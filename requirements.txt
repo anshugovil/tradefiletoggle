@@ -1,0 +1,14 @@
+# Core dependencies
+pandas>=1.5.0
+numpy>=1.23.0
+openpyxl>=3.0.0
+xlrd>=2.0.0
+
+# For password-protected Excel files
+msoffcrypto-tool>=5.0.0
+
+# Streamlit - no version specified to use latest
+streamlit
+
+# Additional utilities
+python-dateutil>=2.8.0
