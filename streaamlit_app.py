@@ -11,6 +11,7 @@ import logging
 from datetime import datetime
 import traceback
 import io
+import os
 
 # Import our modules - these should be in the same directory
 from input_parser import InputParser
@@ -20,7 +21,7 @@ from trade_processor import TradeProcessor
 from output_generator import OutputGenerator
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)  # Changed to DEBUG for better error tracking
 logger = logging.getLogger(__name__)
 
 # Page configuration
@@ -83,30 +84,51 @@ def main():
             help="MS format trade file"
         )
         
-        # Mapping file upload
+        # Mapping file section
         st.subheader("3. Mapping File")
-        mapping_file = st.file_uploader(
-            "Upload Symbol Mapping File (CSV)",
-            type=['csv'],
-            key='mapping_file',
-            help="Symbol to Bloomberg ticker mapping"
-        )
         
-        # Use default mapping file option
-        use_default_mapping = st.checkbox(
-            "Use default mapping file",
-            value=False,
-            help="Use 'futures mapping.csv' if available locally"
-        )
+        # Check if default mapping file exists in the repo
+        default_mapping_exists = Path("futures mapping.csv").exists() or Path("futures_mapping.csv").exists()
+        
+        if default_mapping_exists:
+            use_default = st.radio(
+                "Mapping file source:",
+                ["Use default from repository", "Upload custom mapping file"],
+                index=0
+            )
+            
+            if use_default == "Upload custom mapping file":
+                mapping_file = st.file_uploader(
+                    "Upload Symbol Mapping File (CSV)",
+                    type=['csv'],
+                    key='mapping_file',
+                    help="Symbol to Bloomberg ticker mapping"
+                )
+            else:
+                mapping_file = None
+                st.info("✓ Using default mapping file from repository")
+        else:
+            st.warning("No default mapping file found in repository. Please upload one.")
+            mapping_file = st.file_uploader(
+                "Upload Symbol Mapping File (CSV)",
+                type=['csv'],
+                key='mapping_file',
+                help="Symbol to Bloomberg ticker mapping (Required)"
+            )
+            use_default = None
         
         st.divider()
         
         # Process button
+        can_process = (position_file is not None and 
+                      trade_file is not None and 
+                      (mapping_file is not None or (use_default == "Use default from repository" and default_mapping_exists)))
+        
         process_button = st.button(
             "🚀 Process Trades",
             type="primary",
             use_container_width=True,
-            disabled=(position_file is None or trade_file is None or (mapping_file is None and not use_default_mapping))
+            disabled=not can_process
         )
     
     # Main content area
@@ -119,7 +141,7 @@ def main():
             **How it works:**
             1. Upload your position file (initial positions)
             2. Upload your trade file (trades to process)
-            3. Upload mapping file (required)
+            3. Use default or upload mapping file
             4. Click 'Process Trades' to run the analysis
             """)
         
@@ -134,14 +156,13 @@ def main():
         
         # Process files when button clicked
         if process_button:
-            if position_file and trade_file:
-                process_files(position_file, trade_file, mapping_file, use_default_mapping)
+            process_files(position_file, trade_file, mapping_file, use_default, default_mapping_exists)
     
     else:
         # Display results
         display_results()
 
-def process_files(position_file, trade_file, mapping_file, use_default_mapping):
+def process_files(position_file, trade_file, mapping_file, use_default, default_mapping_exists):
     """Process the uploaded files"""
     try:
         with st.spinner("Processing files..."):
@@ -166,8 +187,15 @@ def process_files(position_file, trade_file, mapping_file, use_default_mapping):
                 with tempfile.NamedTemporaryFile(delete=False, suffix='.csv') as tmp_map:
                     tmp_map.write(mapping_file.getbuffer())
                     mapping_file_path = tmp_map.name
-            elif use_default_mapping and Path("futures mapping.csv").exists():
-                mapping_file_path = "futures mapping.csv"
+            elif use_default == "Use default from repository" and default_mapping_exists:
+                # Try both possible names
+                if Path("futures mapping.csv").exists():
+                    mapping_file_path = "futures mapping.csv"
+                elif Path("futures_mapping.csv").exists():
+                    mapping_file_path = "futures_mapping.csv"
+                else:
+                    st.error("Default mapping file not found")
+                    return
             else:
                 st.error("Please provide a mapping file")
                 return
@@ -185,27 +213,52 @@ def process_files(position_file, trade_file, mapping_file, use_default_mapping):
             
             positions = input_parser.parse_file(pos_file_path)
             if not positions:
-                st.error("No positions found in the position file")
+                st.error("No positions found in the position file. Please check the file format.")
+                st.info("Supported formats: BOD (16+ columns), Contract (12+ columns), MS (21+ columns)")
                 return
             
             st.success(f"✅ Parsed {len(positions)} positions from {input_parser.format_type} format")
+            
+            # Display unmapped symbols if any
+            if input_parser.unmapped_symbols:
+                with st.expander(f"⚠️ Warning: {len(input_parser.unmapped_symbols)} unmapped symbols"):
+                    unmapped_df = pd.DataFrame(input_parser.unmapped_symbols)
+                    st.dataframe(unmapped_df)
             
             # Step 4: Parse trade file
             status_text.text("Parsing trade file...")
             progress_bar.progress(40)
             
-            # Read the raw trade DataFrame
-            if trade_file_path.endswith('.csv'):
-                trade_df = pd.read_csv(trade_file_path)
-            else:
-                trade_df = pd.read_excel(trade_file_path)
+            # Read the raw trade DataFrame - handle both with and without headers
+            try:
+                if trade_file_path.endswith('.csv'):
+                    trade_df = pd.read_csv(trade_file_path, header=None)
+                else:
+                    trade_df = pd.read_excel(trade_file_path, header=None)
+            except:
+                if trade_file_path.endswith('.csv'):
+                    trade_df = pd.read_csv(trade_file_path)
+                else:
+                    trade_df = pd.read_excel(trade_file_path)
+            
+            # Ensure we have 14 columns minimum
+            if trade_df.shape[1] < 14:
+                st.error(f"Trade file has only {trade_df.shape[1]} columns. Expected at least 14 columns for MS format.")
+                return
             
             trades = trade_parser.parse_trade_file(trade_file_path)
             if not trades:
-                st.error("No trades found in the trade file")
+                st.error("No trades found in the trade file. Please check the file format.")
+                st.info("Expected MS format with 14 columns")
                 return
             
             st.success(f"✅ Parsed {len(trades)} trades from {trade_parser.format_type} format")
+            
+            # Display unmapped symbols if any
+            if trade_parser.unmapped_symbols:
+                with st.expander(f"⚠️ Warning: {len(trade_parser.unmapped_symbols)} unmapped trade symbols"):
+                    unmapped_df = pd.DataFrame(trade_parser.unmapped_symbols)
+                    st.dataframe(unmapped_df)
             
             # Step 5: Initialize position manager
             status_text.text("Initializing position manager...")
@@ -213,6 +266,10 @@ def process_files(position_file, trade_file, mapping_file, use_default_mapping):
             
             position_manager = PositionManager()
             starting_positions_df = position_manager.initialize_from_positions(positions)
+            
+            # Show starting positions
+            with st.expander("📊 Starting Positions"):
+                st.dataframe(starting_positions_df)
             
             # Step 6: Process trades
             status_text.text("Processing trades against positions...")
@@ -226,6 +283,12 @@ def process_files(position_file, trade_file, mapping_file, use_default_mapping):
             
             # Process trades
             processed_trades_df = trade_processor.process_trades(trades, trade_df)
+            
+            # Check if processing produced results
+            if processed_trades_df.empty:
+                st.error("No trades were processed. This might be due to ticker mismatch.")
+                st.info("Please ensure the symbols in your trade file match those in the mapping file.")
+                return
             
             # Step 7: Get final positions
             status_text.text("Calculating final positions...")
@@ -270,7 +333,7 @@ def process_files(position_file, trade_file, mapping_file, use_default_mapping):
             with col2:
                 st.metric("Trades Processed", len(trades))
             with col3:
-                split_count = len(processed_trades_df[processed_trades_df['Split?'] == 'Yes']) if 'Split?' in processed_trades_df else 0
+                split_count = len(processed_trades_df[processed_trades_df['Split?'] == 'Yes']) if 'Split?' in processed_trades_df.columns else 0
                 st.metric("Split Trades", split_count)
             with col4:
                 st.metric("Final Positions", len(final_positions_df))
@@ -336,9 +399,10 @@ def display_results():
             with col1:
                 st.metric("Total Positions", len(df))
             with col2:
-                long_count = len(df[df['QTY'] > 0])
-                short_count = len(df[df['QTY'] < 0])
-                st.metric("Long/Short", f"{long_count}/{short_count}")
+                if len(df) > 0:
+                    long_count = len(df[df['QTY'] > 0])
+                    short_count = len(df[df['QTY'] < 0])
+                    st.metric("Long/Short", f"{long_count}/{short_count}")
             
             st.dataframe(df, use_container_width=True)
     
@@ -396,29 +460,42 @@ def display_results():
         st.subheader("📥 Download Output Files")
         
         # Create download buttons for each file
-        for file_type, file_path in st.session_state.output_files.items():
-            if file_path and Path(file_path).exists():
-                with open(file_path, 'rb') as f:
-                    file_bytes = f.read()
-                
-                file_name = Path(file_path).name
-                if 'excel' in file_type:
-                    mime_type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-                    label = f"📊 {file_name}"
-                elif 'summary' in file_type:
-                    mime_type = 'text/plain'
-                    label = f"📄 {file_name}"
-                else:
-                    mime_type = 'text/csv'
-                    label = f"📈 {file_name}"
-                
-                st.download_button(
-                    label=label,
-                    data=file_bytes,
-                    file_name=file_name,
-                    mime=mime_type,
-                    key=f"download_{file_type}"
-                )
+        if st.session_state.output_files:
+            for file_type, file_path in st.session_state.output_files.items():
+                if file_path and Path(file_path).exists():
+                    with open(file_path, 'rb') as f:
+                        file_bytes = f.read()
+                    
+                    file_name = Path(file_path).name
+                    if 'excel' in file_type:
+                        mime_type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                        label = f"📊 {file_name}"
+                    elif 'summary' in file_type:
+                        mime_type = 'text/plain'
+                        label = f"📄 {file_name}"
+                    else:
+                        mime_type = 'text/csv'
+                        label = f"📈 {file_name}"
+                    
+                    st.download_button(
+                        label=label,
+                        data=file_bytes,
+                        file_name=file_name,
+                        mime=mime_type,
+                        key=f"download_{file_type}"
+                    )
+            
+            # Show summary report content
+            if 'summary' in st.session_state.output_files:
+                summary_path = st.session_state.output_files['summary']
+                if Path(summary_path).exists():
+                    st.subheader("📝 Summary Report")
+                    with open(summary_path, 'r') as f:
+                        summary_content = f.read()
+                    with st.expander("View Summary Report"):
+                        st.text(summary_content)
+        else:
+            st.warning("No output files available. Please process files first.")
 
 if __name__ == "__main__":
     main()
