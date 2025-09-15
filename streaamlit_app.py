@@ -1,6 +1,6 @@
 """
 Streamlit Application for Trade Strategy Processing System
-Main GUI interface for processing trades against positions
+Complete version with output display and downloads
 """
 
 import streamlit as st
@@ -13,7 +13,7 @@ import traceback
 import io
 import os
 
-# Import our modules - these should be in the same directory
+# Import our modules
 from input_parser import InputParser
 from Trade_Parser import TradeParser
 from position_manager import PositionManager
@@ -21,7 +21,7 @@ from trade_processor import TradeProcessor
 from output_generator import OutputGenerator
 
 # Configure logging
-logging.basicConfig(level=logging.DEBUG)  # Changed to DEBUG for better error tracking
+logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 # Page configuration
@@ -32,7 +32,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for better styling
+# Custom CSS
 st.markdown("""
     <style>
     .main {
@@ -46,6 +46,8 @@ st.markdown("""
     }
     .stDownloadButton button {
         width: 100%;
+        background-color: #4CAF50;
+        color: white;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -62,11 +64,11 @@ def main():
     st.title("🎯 Trade Strategy Processing System")
     st.markdown("### Assign strategies to trades based on position directions")
     
-    # Sidebar for file inputs and configuration
+    # Sidebar for file inputs
     with st.sidebar:
         st.header("📁 Input Files")
         
-        # Position file upload
+        # Position file
         st.subheader("1. Position File")
         position_file = st.file_uploader(
             "Upload Position File (Excel/CSV)",
@@ -75,7 +77,7 @@ def main():
             help="BOD, Contract, or MS format position file"
         )
         
-        # Trade file upload
+        # Trade file
         st.subheader("2. Trade File")
         trade_file = st.file_uploader(
             "Upload Trade File (Excel/CSV)",
@@ -84,13 +86,19 @@ def main():
             help="MS format trade file"
         )
         
-        # Mapping file section
+        # Mapping file
         st.subheader("3. Mapping File")
         
-        # Check if default mapping file exists in the repo
-        default_mapping_exists = Path("futures mapping.csv").exists() or Path("futures_mapping.csv").exists()
+        # Check for default mapping files
+        default_exists = False
+        default_path = None
+        for possible_name in ["futures mapping.csv", "futures_mapping.csv"]:
+            if Path(possible_name).exists():
+                default_exists = True
+                default_path = possible_name
+                break
         
-        if default_mapping_exists:
+        if default_exists:
             use_default = st.radio(
                 "Mapping file source:",
                 ["Use default from repository", "Upload custom mapping file"],
@@ -101,28 +109,29 @@ def main():
                 mapping_file = st.file_uploader(
                     "Upload Symbol Mapping File (CSV)",
                     type=['csv'],
-                    key='mapping_file',
-                    help="Symbol to Bloomberg ticker mapping"
+                    key='mapping_file'
                 )
             else:
                 mapping_file = None
-                st.info("✓ Using default mapping file from repository")
+                st.success(f"✓ Using {default_path}")
         else:
-            st.warning("No default mapping file found in repository. Please upload one.")
+            st.warning("No default mapping file found. Please upload one.")
             mapping_file = st.file_uploader(
                 "Upload Symbol Mapping File (CSV)",
                 type=['csv'],
                 key='mapping_file',
-                help="Symbol to Bloomberg ticker mapping (Required)"
+                help="Required: Symbol to Bloomberg ticker mapping"
             )
             use_default = None
         
         st.divider()
         
         # Process button
-        can_process = (position_file is not None and 
-                      trade_file is not None and 
-                      (mapping_file is not None or (use_default == "Use default from repository" and default_mapping_exists)))
+        can_process = (
+            position_file is not None and 
+            trade_file is not None and 
+            (mapping_file is not None or (use_default == "Use default from repository" and default_exists))
+        )
         
         process_button = st.button(
             "🚀 Process Trades",
@@ -130,10 +139,18 @@ def main():
             use_container_width=True,
             disabled=not can_process
         )
+        
+        # Reset button if already processed
+        if st.session_state.processed:
+            if st.button("🔄 Reset", type="secondary", use_container_width=True):
+                st.session_state.processed = False
+                st.session_state.output_files = {}
+                st.session_state.dataframes = {}
+                st.rerun()
     
     # Main content area
     if not st.session_state.processed:
-        # Instructions and information
+        # Instructions
         col1, col2 = st.columns(2)
         
         with col1:
@@ -142,35 +159,40 @@ def main():
             1. Upload your position file (initial positions)
             2. Upload your trade file (trades to process)
             3. Use default or upload mapping file
-            4. Click 'Process Trades' to run the analysis
+            4. Click 'Process Trades' to run
             """)
         
         with col2:
             st.success("""
-            **Strategy Assignment Rules:**
+            **Strategy Rules:**
             - **FULO**: Long Futures/Calls, Short Puts
             - **FUSH**: Short Futures/Calls, Long Puts
             - Trades inherit position's strategy when closing
             - Trades split when exceeding position size
             """)
         
-        # Process files when button clicked
+        # Process when button clicked
         if process_button:
-            process_files(position_file, trade_file, mapping_file, use_default, default_mapping_exists)
+            process_files(
+                position_file, 
+                trade_file, 
+                mapping_file, 
+                use_default, 
+                default_path if default_exists else None
+            )
     
     else:
         # Display results
         display_results()
 
-def process_files(position_file, trade_file, mapping_file, use_default, default_mapping_exists):
+def process_files(position_file, trade_file, mapping_file, use_default, default_path):
     """Process the uploaded files"""
     try:
         with st.spinner("Processing files..."):
-            # Create progress bar
             progress_bar = st.progress(0)
             status_text = st.empty()
             
-            # Step 1: Save uploaded files temporarily
+            # Save uploaded files
             status_text.text("Saving uploaded files...")
             progress_bar.progress(10)
             
@@ -187,49 +209,40 @@ def process_files(position_file, trade_file, mapping_file, use_default, default_
                 with tempfile.NamedTemporaryFile(delete=False, suffix='.csv') as tmp_map:
                     tmp_map.write(mapping_file.getbuffer())
                     mapping_file_path = tmp_map.name
-            elif use_default == "Use default from repository" and default_mapping_exists:
-                # Try both possible names
-                if Path("futures mapping.csv").exists():
-                    mapping_file_path = "futures mapping.csv"
-                elif Path("futures_mapping.csv").exists():
-                    mapping_file_path = "futures_mapping.csv"
-                else:
-                    st.error("Default mapping file not found")
-                    return
+            elif use_default == "Use default from repository":
+                mapping_file_path = default_path
             else:
                 st.error("Please provide a mapping file")
                 return
             
-            # Step 2: Initialize parsers
+            # Initialize parsers
             status_text.text("Initializing parsers...")
             progress_bar.progress(20)
             
             input_parser = InputParser(mapping_file_path)
             trade_parser = TradeParser(mapping_file_path)
             
-            # Step 3: Parse position file
+            # Parse position file
             status_text.text("Parsing position file...")
             progress_bar.progress(30)
             
             positions = input_parser.parse_file(pos_file_path)
             if not positions:
-                st.error("No positions found in the position file. Please check the file format.")
-                st.info("Supported formats: BOD (16+ columns), Contract (12+ columns), MS (21+ columns)")
+                st.error("❌ No positions found in the position file")
                 return
             
             st.success(f"✅ Parsed {len(positions)} positions from {input_parser.format_type} format")
             
-            # Display unmapped symbols if any
+            # Show unmapped symbols
             if input_parser.unmapped_symbols:
-                with st.expander(f"⚠️ Warning: {len(input_parser.unmapped_symbols)} unmapped symbols"):
-                    unmapped_df = pd.DataFrame(input_parser.unmapped_symbols)
-                    st.dataframe(unmapped_df)
+                with st.expander(f"⚠️ {len(input_parser.unmapped_symbols)} unmapped position symbols"):
+                    st.dataframe(pd.DataFrame(input_parser.unmapped_symbols))
             
-            # Step 4: Parse trade file
+            # Parse trade file
             status_text.text("Parsing trade file...")
             progress_bar.progress(40)
             
-            # Read the raw trade DataFrame - handle both with and without headers
+            # Read raw trade DataFrame
             try:
                 if trade_file_path.endswith('.csv'):
                     trade_df = pd.read_csv(trade_file_path, header=None)
@@ -241,62 +254,49 @@ def process_files(position_file, trade_file, mapping_file, use_default, default_
                 else:
                     trade_df = pd.read_excel(trade_file_path)
             
-            # Ensure we have 14 columns minimum
-            if trade_df.shape[1] < 14:
-                st.error(f"Trade file has only {trade_df.shape[1]} columns. Expected at least 14 columns for MS format.")
-                return
-            
             trades = trade_parser.parse_trade_file(trade_file_path)
             if not trades:
-                st.error("No trades found in the trade file. Please check the file format.")
-                st.info("Expected MS format with 14 columns")
+                st.error("❌ No trades found in the trade file")
                 return
             
             st.success(f"✅ Parsed {len(trades)} trades from {trade_parser.format_type} format")
             
-            # Display unmapped symbols if any
+            # Show unmapped symbols
             if trade_parser.unmapped_symbols:
-                with st.expander(f"⚠️ Warning: {len(trade_parser.unmapped_symbols)} unmapped trade symbols"):
-                    unmapped_df = pd.DataFrame(trade_parser.unmapped_symbols)
-                    st.dataframe(unmapped_df)
+                with st.expander(f"⚠️ {len(trade_parser.unmapped_symbols)} unmapped trade symbols"):
+                    st.dataframe(pd.DataFrame(trade_parser.unmapped_symbols))
             
-            # Step 5: Initialize position manager
+            # DIAGNOSTIC SECTION
+            with st.expander("🔍 Ticker Matching Diagnostic"):
+                show_ticker_diagnostic(positions, trades)
+            
+            # Initialize position manager
             status_text.text("Initializing position manager...")
             progress_bar.progress(50)
             
             position_manager = PositionManager()
             starting_positions_df = position_manager.initialize_from_positions(positions)
             
-            # Show starting positions
-            with st.expander("📊 Starting Positions"):
-                st.dataframe(starting_positions_df)
-            
-            # Step 6: Process trades
+            # Process trades
             status_text.text("Processing trades against positions...")
             progress_bar.progress(60)
             
             trade_processor = TradeProcessor(position_manager)
+            output_gen = OutputGenerator()
             
             # Create parsed trades DataFrame
-            output_gen = OutputGenerator()
             parsed_trades_df = output_gen.create_trade_dataframe_from_positions(trades)
             
             # Process trades
             processed_trades_df = trade_processor.process_trades(trades, trade_df)
             
-            # Check if processing produced results
-            if processed_trades_df.empty:
-                st.error("No trades were processed. This might be due to ticker mismatch.")
-                st.info("Please ensure the symbols in your trade file match those in the mapping file.")
-                return
-            
-            # Step 7: Get final positions
+            # Get final positions
             status_text.text("Calculating final positions...")
             progress_bar.progress(80)
             
             final_positions_df = position_manager.get_final_positions()
             
-            # Step 8: Generate outputs
+            # Generate output files
             status_text.text("Generating output files...")
             progress_bar.progress(90)
             
@@ -322,107 +322,176 @@ def process_files(position_file, trade_file, mapping_file, use_default, default_
             progress_bar.progress(100)
             status_text.text("Processing complete!")
             
-            # Display success message
+            # Success message
             st.balloons()
             st.success("🎉 Processing completed successfully!")
             
-            # Show summary statistics
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("Starting Positions", len(starting_positions_df))
-            with col2:
-                st.metric("Trades Processed", len(trades))
-            with col3:
-                split_count = len(processed_trades_df[processed_trades_df['Split?'] == 'Yes']) if 'Split?' in processed_trades_df.columns else 0
-                st.metric("Split Trades", split_count)
-            with col4:
-                st.metric("Final Positions", len(final_positions_df))
+            # Show summary
+            show_processing_summary(starting_positions_df, trades, processed_trades_df, final_positions_df)
             
     except Exception as e:
-        st.error(f"Error during processing: {str(e)}")
+        st.error(f"❌ Error: {str(e)}")
         st.code(traceback.format_exc())
-        logger.error(f"Processing error: {e}", exc_info=True)
+
+def show_ticker_diagnostic(positions, trades):
+    """Show diagnostic information about ticker matching"""
+    st.subheader("Ticker Matching Analysis")
+    
+    # Get position tickers
+    position_details = []
+    for pos in positions:
+        position_details.append({
+            'Symbol': pos.symbol,
+            'Bloomberg Ticker': pos.bloomberg_ticker,
+            'Quantity': pos.position_lots,
+            'Type': pos.security_type
+        })
+    
+    # Get trade tickers
+    trade_details = []
+    for trade in trades:
+        trade_details.append({
+            'Symbol': trade.symbol,
+            'Bloomberg Ticker': trade.bloomberg_ticker,
+            'Quantity': trade.position_lots,
+            'Type': trade.security_type
+        })
+    
+    # Create sets for comparison
+    position_tickers = {p['Bloomberg Ticker'] for p in position_details}
+    trade_tickers = {t['Bloomberg Ticker'] for t in trade_details}
+    
+    # Find matches
+    matching = position_tickers.intersection(trade_tickers)
+    unmatched_pos = position_tickers - trade_tickers
+    unmatched_trades = trade_tickers - position_tickers
+    
+    # Display
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Matching Tickers", len(matching))
+    with col2:
+        st.metric("Unmatched Positions", len(unmatched_pos))
+    with col3:
+        st.metric("Unmatched Trades", len(unmatched_trades))
+    
+    # Show expected splits
+    split_count = 0
+    for ticker in matching:
+        pos = next(p for p in position_details if p['Bloomberg Ticker'] == ticker)
+        trade = next(t for t in trade_details if t['Bloomberg Ticker'] == ticker)
+        
+        if (pos['Quantity'] > 0 and trade['Quantity'] < 0) or \
+           (pos['Quantity'] < 0 and trade['Quantity'] > 0):
+            if abs(trade['Quantity']) > abs(pos['Quantity']):
+                split_count += 1
+    
+    st.info(f"Expected splits: {split_count}")
+
+def show_processing_summary(starting_df, trades, processed_df, final_df):
+    """Show summary statistics"""
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric("Starting Positions", len(starting_df))
+    
+    with col2:
+        st.metric("Trades Processed", len(trades))
+    
+    with col3:
+        split_count = 0
+        if 'Split?' in processed_df.columns:
+            split_count = len(processed_df[processed_df['Split?'] == 'Yes'])
+        st.metric("Split Trades", split_count)
+    
+    with col4:
+        st.metric("Final Positions", len(final_df))
 
 def display_results():
     """Display the processing results"""
     st.header("📊 Processing Results")
     
-    # Add a reset button
-    if st.button("🔄 Process New Files", type="secondary"):
-        st.session_state.processed = False
-        st.session_state.output_files = {}
-        st.session_state.dataframes = {}
-        st.rerun()
-    
-    # Create tabs for different outputs
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    # Create tabs
+    tabs = st.tabs([
         "📈 Processed Trades",
         "📍 Starting Positions",
-        "📍 Final Positions", 
+        "📍 Final Positions",
         "📋 Parsed Trades",
         "📥 Download Files"
     ])
     
-    with tab1:
-        st.subheader("Processed Trades with Strategy Assignment")
+    # Tab 1: Processed Trades
+    with tabs[0]:
         if 'processed_trades' in st.session_state.dataframes:
             df = st.session_state.dataframes['processed_trades']
             
-            # Display summary metrics
-            col1, col2, col3 = st.columns(3)
+            st.subheader("Processed Trades with Strategy Assignment")
+            
+            # Metrics
+            col1, col2, col3, col4 = st.columns(4)
             with col1:
-                if 'Strategy' in df.columns:
-                    st.metric("FULO Trades", len(df[df['Strategy'] == 'FULO']))
+                st.metric("Total Rows", len(df))
             with col2:
                 if 'Strategy' in df.columns:
-                    st.metric("FUSH Trades", len(df[df['Strategy'] == 'FUSH']))
+                    st.metric("FULO", len(df[df['Strategy'] == 'FULO']))
             with col3:
+                if 'Strategy' in df.columns:
+                    st.metric("FUSH", len(df[df['Strategy'] == 'FUSH']))
+            with col4:
                 if 'Opposite?' in df.columns:
-                    st.metric("Opposite Trades", len(df[df['Opposite?'] == 'Yes']))
+                    st.metric("Opposite", len(df[df['Opposite?'] == 'Yes']))
             
-            # Display the dataframe
+            # Show dataframe
             st.dataframe(df, use_container_width=True, height=400)
             
-            # Highlight split trades
+            # Show splits
             if 'Split?' in df.columns:
-                split_trades = df[df['Split?'] == 'Yes']
-                if not split_trades.empty:
+                splits = df[df['Split?'] == 'Yes']
+                if not splits.empty:
                     st.subheader("🔀 Split Trades")
-                    st.dataframe(split_trades, use_container_width=True)
+                    st.dataframe(splits, use_container_width=True)
+        else:
+            st.warning("No processed trades data available")
     
-    with tab2:
-        st.subheader("Starting Positions")
+    # Tab 2: Starting Positions
+    with tabs[1]:
         if 'starting_positions' in st.session_state.dataframes:
             df = st.session_state.dataframes['starting_positions']
             
+            st.subheader("Starting Positions")
+            
+            # Metrics
             col1, col2 = st.columns(2)
             with col1:
-                st.metric("Total Positions", len(df))
+                st.metric("Total", len(df))
             with col2:
-                if len(df) > 0:
-                    long_count = len(df[df['QTY'] > 0])
-                    short_count = len(df[df['QTY'] < 0])
-                    st.metric("Long/Short", f"{long_count}/{short_count}")
+                long = len(df[df['QTY'] > 0]) if len(df) > 0 else 0
+                short = len(df[df['QTY'] < 0]) if len(df) > 0 else 0
+                st.metric("Long/Short", f"{long}/{short}")
             
             st.dataframe(df, use_container_width=True)
+        else:
+            st.warning("No starting positions data available")
     
-    with tab3:
-        st.subheader("Final Positions After Trade Processing")
+    # Tab 3: Final Positions
+    with tabs[2]:
         if 'final_positions' in st.session_state.dataframes:
             df = st.session_state.dataframes['final_positions']
             
+            st.subheader("Final Positions")
+            
+            # Metrics
             col1, col2 = st.columns(2)
             with col1:
-                st.metric("Total Positions", len(df))
+                st.metric("Total", len(df))
             with col2:
-                if len(df) > 0:
-                    long_count = len(df[df['QTY'] > 0])
-                    short_count = len(df[df['QTY'] < 0])
-                    st.metric("Long/Short", f"{long_count}/{short_count}")
+                long = len(df[df['QTY'] > 0]) if len(df) > 0 else 0
+                short = len(df[df['QTY'] < 0]) if len(df) > 0 else 0
+                st.metric("Long/Short", f"{long}/{short}")
             
             st.dataframe(df, use_container_width=True)
             
-            # Show position changes
+            # Position changes
             if 'starting_positions' in st.session_state.dataframes:
                 start_df = st.session_state.dataframes['starting_positions']
                 st.subheader("📊 Position Changes")
@@ -430,72 +499,77 @@ def display_results():
                 start_tickers = set(start_df['Ticker'].unique())
                 final_tickers = set(df['Ticker'].unique()) if len(df) > 0 else set()
                 
-                new_positions = final_tickers - start_tickers
-                closed_positions = start_tickers - final_tickers
+                new_pos = final_tickers - start_tickers
+                closed_pos = start_tickers - final_tickers
                 
                 col1, col2 = st.columns(2)
                 with col1:
-                    if new_positions:
-                        st.info(f"**New Positions Opened ({len(new_positions)}):**")
-                        for ticker in list(new_positions)[:10]:
-                            st.write(f"• {ticker}")
-                        if len(new_positions) > 10:
-                            st.write(f"... and {len(new_positions) - 10} more")
-                
+                    if new_pos:
+                        st.info(f"**{len(new_pos)} New Positions**")
                 with col2:
-                    if closed_positions:
-                        st.warning(f"**Positions Closed ({len(closed_positions)}):**")
-                        for ticker in list(closed_positions)[:10]:
-                            st.write(f"• {ticker}")
-                        if len(closed_positions) > 10:
-                            st.write(f"... and {len(closed_positions) - 10} more")
+                    if closed_pos:
+                        st.warning(f"**{len(closed_pos)} Closed Positions**")
+        else:
+            st.warning("No final positions data available")
     
-    with tab4:
-        st.subheader("Parsed Trades (Raw)")
+    # Tab 4: Parsed Trades
+    with tabs[3]:
         if 'parsed_trades' in st.session_state.dataframes:
             df = st.session_state.dataframes['parsed_trades']
+            
+            st.subheader("Parsed Trades (Raw)")
             st.dataframe(df, use_container_width=True)
+        else:
+            st.warning("No parsed trades data available")
     
-    with tab5:
+    # Tab 5: Download Files
+    with tabs[4]:
         st.subheader("📥 Download Output Files")
         
-        # Create download buttons for each file
         if st.session_state.output_files:
-            for file_type, file_path in st.session_state.output_files.items():
-                if file_path and Path(file_path).exists():
-                    with open(file_path, 'rb') as f:
-                        file_bytes = f.read()
-                    
-                    file_name = Path(file_path).name
-                    if 'excel' in file_type:
-                        mime_type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-                        label = f"📊 {file_name}"
-                    elif 'summary' in file_type:
-                        mime_type = 'text/plain'
-                        label = f"📄 {file_name}"
-                    else:
-                        mime_type = 'text/csv'
-                        label = f"📈 {file_name}"
-                    
-                    st.download_button(
-                        label=label,
-                        data=file_bytes,
-                        file_name=file_name,
-                        mime=mime_type,
-                        key=f"download_{file_type}"
-                    )
+            st.success("✅ All output files are ready for download!")
+            
+            # Create columns for download buttons
+            col1, col2 = st.columns(2)
+            
+            file_order = [
+                ('parsed_trades', '1️⃣ Parsed Trades (CSV)', 'text/csv'),
+                ('starting_positions', '2️⃣ Starting Positions (CSV)', 'text/csv'),
+                ('processed_trades', '3️⃣ Processed Trades (CSV)', 'text/csv'),
+                ('processed_trades_excel', '📊 Processed Trades (Excel)', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'),
+                ('final_positions', '4️⃣ Final Positions (CSV)', 'text/csv'),
+                ('summary', '📝 Summary Report (TXT)', 'text/plain')
+            ]
+            
+            for idx, (file_key, label, mime) in enumerate(file_order):
+                if file_key in st.session_state.output_files:
+                    file_path = st.session_state.output_files[file_key]
+                    if file_path and Path(file_path).exists():
+                        with open(file_path, 'rb') as f:
+                            file_data = f.read()
+                        
+                        # Use columns for layout
+                        target_col = col1 if idx % 2 == 0 else col2
+                        with target_col:
+                            st.download_button(
+                                label=label,
+                                data=file_data,
+                                file_name=Path(file_path).name,
+                                mime=mime,
+                                key=f"download_{file_key}",
+                                use_container_width=True
+                            )
             
             # Show summary report content
+            st.divider()
             if 'summary' in st.session_state.output_files:
                 summary_path = st.session_state.output_files['summary']
                 if Path(summary_path).exists():
-                    st.subheader("📝 Summary Report")
-                    with open(summary_path, 'r') as f:
-                        summary_content = f.read()
-                    with st.expander("View Summary Report"):
-                        st.text(summary_content)
+                    with st.expander("📝 View Summary Report"):
+                        with open(summary_path, 'r') as f:
+                            st.text(f.read())
         else:
-            st.warning("No output files available. Please process files first.")
+            st.error("❌ No output files available. Please process files first.")
 
 if __name__ == "__main__":
     main()
