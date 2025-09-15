@@ -1,10 +1,12 @@
 """
 Position Manager Module - COMPLETE FIXED VERSION
 Properly tracks positions and their strategies, updating strategy when positions flip
+Includes all methods required by Streamlit app
 """
 
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Dict, Optional, List
+import pandas as pd
 import logging
 
 logger = logging.getLogger(__name__)
@@ -26,6 +28,7 @@ class PositionManager:
     
     def __init__(self):
         self.positions: Dict[str, Position] = {}
+        self.initial_positions_df = None  # Store initial positions for reference
     
     def get_position(self, ticker: str) -> Optional[Position]:
         """Get current position for a ticker"""
@@ -75,6 +78,92 @@ class PositionManager:
                 else:
                     logger.info(f"Updated {ticker}: qty {old_quantity}->{new_quantity}, "
                               f"strategy remains {strategy}")
+    
+    def initialize_from_positions(self, initial_positions: List) -> pd.DataFrame:
+        """
+        Initialize position manager with existing positions from input parser
+        
+        Args:
+            initial_positions: List of Position objects from input parser
+            
+        Returns:
+            DataFrame of starting positions
+        """
+        self.positions.clear()
+        positions_data = []
+        
+        for pos in initial_positions:
+            # Determine initial strategy based on position direction and security type
+            if pos.security_type == 'Put':
+                # Puts are inverted
+                strategy = 'FUSH' if pos.position_lots > 0 else 'FULO'
+            else:  # Futures or Calls
+                strategy = 'FULO' if pos.position_lots > 0 else 'FUSH'
+            
+            # Create Position object
+            self.positions[pos.bloomberg_ticker] = Position(
+                ticker=pos.bloomberg_ticker,
+                quantity=pos.position_lots,
+                security_type=pos.security_type,
+                strategy=strategy
+            )
+            
+            # Add to DataFrame data
+            positions_data.append({
+                'Ticker': pos.bloomberg_ticker,
+                'Symbol': pos.symbol,
+                'Security_Type': pos.security_type,
+                'Expiry': pos.expiry_date,
+                'Strike': pos.strike_price if pos.security_type != 'Futures' else 0,
+                'QTY': pos.position_lots * pos.lot_size,
+                'Lots': pos.position_lots,
+                'Lot_Size': pos.lot_size,
+                'Strategy': strategy,
+                'Direction': 'Long' if pos.position_lots > 0 else 'Short'
+            })
+            
+            logger.info(f"Initialized position: {pos.bloomberg_ticker} with {pos.position_lots} lots, strategy={strategy}")
+        
+        # Create and store initial positions DataFrame
+        self.initial_positions_df = pd.DataFrame(positions_data)
+        return self.initial_positions_df
+    
+    def get_final_positions(self) -> pd.DataFrame:
+        """
+        Get final positions as a DataFrame
+        
+        Returns:
+            DataFrame of current positions
+        """
+        positions_data = []
+        
+        for ticker, position in self.positions.items():
+            # Extract details from bloomberg ticker
+            symbol = ticker.split(' ')[0].replace('=', '')
+            
+            # Determine security type from ticker
+            if 'C' in ticker and ('/' in ticker):
+                security_type = 'Call'
+            elif 'P' in ticker and ('/' in ticker):
+                security_type = 'Put'
+            else:
+                security_type = 'Futures'
+            
+            positions_data.append({
+                'Ticker': ticker,
+                'Symbol': symbol,
+                'Security_Type': position.security_type,
+                'QTY': position.quantity * 100,  # Assuming default lot size of 100
+                'Lots': position.quantity,
+                'Strategy': position.strategy,
+                'Direction': 'Long' if position.quantity > 0 else 'Short'
+            })
+        
+        if positions_data:
+            return pd.DataFrame(positions_data)
+        else:
+            # Return empty DataFrame with correct columns
+            return pd.DataFrame(columns=['Ticker', 'Symbol', 'Security_Type', 'QTY', 'Lots', 'Strategy', 'Direction'])
     
     def is_trade_opposing(self, ticker: str, trade_quantity: float, 
                          security_type: str) -> bool:
