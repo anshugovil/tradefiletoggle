@@ -1,6 +1,6 @@
 """
-Trade Processor Module - FIXED STRATEGY ASSIGNMENT
-Correctly assigns strategies when closing positions
+Trade Processor Module - COMPLETE FIXED VERSION
+Correctly assigns strategies when closing positions and tracks strategy changes
 """
 
 import pandas as pd
@@ -71,6 +71,13 @@ class TradeProcessor:
             # Log results
             for p in processed:
                 logger.info(f"  Result: {p.split_lots} lots, Strategy={p.strategy}, Split={p.is_split}, Opposite={p.is_opposite}")
+            
+            # Log position after processing
+            pos_after = self.position_manager.get_position(trade.bloomberg_ticker)
+            if pos_after:
+                logger.info(f"After trade {trade_idx}: Position={pos_after.quantity} ({pos_after.strategy})")
+            else:
+                logger.info(f"After trade {trade_idx}: No position (closed)")
         
         return self._create_output_dataframe(processed_rows, trade_df, has_headers, header_row)
     
@@ -119,7 +126,8 @@ class TradeProcessor:
                 split_qty=abs(float(original_row.iloc[11]) if pd.notna(original_row.iloc[11]) else trade_quantity * trade.lot_size)
             )
             
-            self.position_manager.update_position(ticker, trade_quantity, security_type)
+            # Update position with strategy
+            self.position_manager.update_position(ticker, trade_quantity, security_type, strategy)
             return [processed]
         
         # Check if trade opposes position
@@ -141,7 +149,8 @@ class TradeProcessor:
                 split_qty=abs(float(original_row.iloc[11]) if pd.notna(original_row.iloc[11]) else trade_quantity * trade.lot_size)
             )
             
-            self.position_manager.update_position(ticker, trade_quantity, security_type)
+            # Update position, keeping the same strategy
+            self.position_manager.update_position(ticker, trade_quantity, security_type, strategy)
             return [processed]
         
         # OPPOSING TRADE - check if split needed
@@ -161,7 +170,8 @@ class TradeProcessor:
                 split_qty=abs(float(original_row.iloc[11]) if pd.notna(original_row.iloc[11]) else trade_quantity * trade.lot_size)
             )
             
-            self.position_manager.update_position(ticker, trade_quantity, security_type)
+            # Update position, keeping the same strategy (position not flipped)
+            self.position_manager.update_position(ticker, trade_quantity, security_type, strategy)
             return [processed]
         
         # SPLIT NEEDED
@@ -206,8 +216,8 @@ class TradeProcessor:
         
         logger.info(f"  Split 1 (close): {close_lots} lots, Strategy={close_strategy} (inherited from position)")
         
-        # Update position (should be zero after close)
-        self.position_manager.update_position(ticker, close_quantity, security_type)
+        # Update position to zero (closing)
+        self.position_manager.update_position(ticker, close_quantity, security_type, close_strategy)
         
         # SECOND SPLIT - OPENING NEW POSITION
         # This gets new strategy based on trade direction
@@ -227,8 +237,9 @@ class TradeProcessor:
         
         logger.info(f"  Split 2 (open): {open_lots} lots, Strategy={new_strategy} (new position)")
         
-        # Update position with new position
-        self.position_manager.update_position(ticker, remaining_quantity, security_type)
+        # Update position with new position AND NEW STRATEGY
+        # This is the KEY FIX - we must update the strategy when position flips
+        self.position_manager.update_position(ticker, remaining_quantity, security_type, new_strategy)
         
         return [processed_close, processed_open]
     
