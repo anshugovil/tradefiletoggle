@@ -1,7 +1,7 @@
 """
-Input Parser Module
+Input Parser Module - FIXED VERSION
 Handles parsing of different position file formats and symbol mapping
-Supports both stock and index futures/options
+Uses unified Bloomberg ticker generation
 """
 
 import pandas as pd
@@ -12,18 +12,15 @@ import re
 import logging
 from dataclasses import dataclass
 
+# Import the unified ticker generator
+from bloomberg_ticker_generator import generate_bloomberg_ticker, is_index_instrument
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
-
-# Constants
-MONTH_CODE = {
-    1: "F", 2: "G", 3: "H", 4: "J", 5: "K", 6: "M",
-    7: "N", 8: "Q", 9: "U", 10: "V", 11: "X", 12: "Z"
-}
 
 @dataclass
 class Position:
@@ -82,8 +79,8 @@ class InputParser:
                     
                     # If no underlying specified, create default
                     if not underlying:
-                        # Special handling for known indices
-                        if symbol.upper() in ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY']:
+                        # Use the unified function to check if it's an index
+                        if is_index_instrument(symbol):
                             underlying = f"{symbol.upper()} INDEX"
                         else:
                             underlying = f"{ticker} IS Equity"
@@ -99,18 +96,13 @@ class InputParser:
                         'ticker': ticker,
                         'underlying': underlying,
                         'lot_size': lot_size,
-                        'original_symbol': symbol  # Keep original symbol for reference
+                        'original_symbol': symbol
                     }
                     mappings[symbol] = mapping
                     normalized_mappings[symbol.upper()] = mapping
             
             self.normalized_mappings = normalized_mappings
             logger.info(f"Loaded {len(mappings)} symbol mappings")
-            
-            # Log indices for debugging
-            for sym in ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY']:
-                if sym in mappings:
-                    logger.info(f"{sym} mapped to: ticker={mappings[sym]['ticker']}, underlying={mappings[sym]['underlying']}")
                     
         except Exception as e:
             logger.error(f"Error loading mapping file: {e}")
@@ -124,15 +116,13 @@ class InputParser:
         
         # Try reading the file with different passwords if it's an Excel file
         if file_path.endswith(('.xls', '.xlsx')):
-            passwords = ['Aurigin2017', 'Aurigin2024', None]  # Try these passwords first
+            passwords = ['Aurigin2017', 'Aurigin2024', None]
             
             for pwd in passwords:
                 try:
                     if pwd:
-                        # Try with password
                         import msoffcrypto
                         import io
-                        import tempfile
                         
                         decrypted = io.BytesIO()
                         with open(file_path, 'rb') as f:
@@ -145,17 +135,14 @@ class InputParser:
                         logger.info(f"Successfully opened file with password")
                         break
                     else:
-                        # Try without password
                         df = pd.read_excel(file_path, header=None)
                         break
                 except Exception as e:
                     if 'encrypted' not in str(e).lower() and pwd is None:
-                        # If it's not an encryption error and no password, it's some other issue
                         logger.error(f"Error reading file: {e}")
                         raise
                     continue
             
-            # If still no success, prompt for password
             if df is None:
                 import getpass
                 user_pwd = getpass.getpass("Enter password for Excel file: ")
@@ -175,7 +162,6 @@ class InputParser:
                     logger.error(f"Failed to open file with provided password: {e}")
                     return []
         else:
-            # CSV file
             df = pd.read_csv(file_path, header=None)
         
         if df is None:
@@ -185,7 +171,6 @@ class InputParser:
         format_type = self._detect_format(df)
         logger.info(f"Detected format: {format_type}")
         
-        # Store format type for later use in naming
         self.format_type = format_type
         
         if format_type == 'BOD':
@@ -200,15 +185,12 @@ class InputParser:
     
     def _detect_format(self, df: pd.DataFrame) -> str:
         """Detect which format the file is in"""
-        # Check for MS format first - it has very specific contract ID patterns in first column
-        # MS format check - look deeper into the file as it might have many header rows
-        if df.shape[1] >= 20:  # MS usually has 22+ columns
+        # MS format check
+        if df.shape[1] >= 20:
             ms_pattern_found = False
-            # Check more rows as MS format might have headers
-            for i in range(min(50, len(df))):  # Check up to 50 rows
+            for i in range(min(50, len(df))):
                 if pd.notna(df.iloc[i, 0]):
                     val = str(df.iloc[i, 0])
-                    # MS format has contract IDs like FUTSTK/FUTIDX-SYMBOL-DATE-TYPE-STRIKE in first column
                     if (('FUTSTK' in val or 'OPTSTK' in val or 'FUTIDX' in val or 'OPTIDX' in val) 
                         and val.count('-') >= 4):
                         ms_pattern_found = True
@@ -218,7 +200,7 @@ class InputParser:
             if ms_pattern_found:
                 return 'MS'
         
-        # Check for CONTRACT format - has contract IDs in column 3
+        # CONTRACT format check
         if df.shape[1] >= 12:
             for i in range(min(20, len(df))):
                 if len(df.iloc[i]) > 3 and pd.notna(df.iloc[i, 3]):
@@ -226,7 +208,7 @@ class InputParser:
                     if ('FUTSTK' in val or 'OPTSTK' in val or 'FUTIDX' in val or 'OPTIDX' in val) and '-' in val:
                         return 'CONTRACT'
         
-        # Default to BOD for files with 16+ columns
+        # Default to BOD
         if df.shape[1] >= 16:
             return 'BOD'
         
@@ -240,7 +222,7 @@ class InputParser:
         for idx in range(data_start, len(df)):
             try:
                 row = df.iloc[idx]
-                if len(row) < 15:  # Changed from 16 to 15 - minimum columns needed
+                if len(row) < 15:
                     continue
                 
                 symbol = str(row.iloc[1]).strip() if pd.notna(row.iloc[1]) else None
@@ -253,35 +235,27 @@ class InputParser:
                 option_type = str(row.iloc[5]).strip() if pd.notna(row.iloc[5]) else ''
                 lot_size = int(row.iloc[6]) if pd.notna(row.iloc[6]) else 1
                 
-                # Modified position calculation - now uses difference of columns 13 and 14
                 try:
-                    # Column 13 (index 13) - Carry Forward Position Buy
                     col13_val = float(row.iloc[13]) if pd.notna(row.iloc[13]) else 0.0
                 except (ValueError, TypeError):
                     col13_val = 0.0
                 
                 try:
-                    # Column 14 (index 14) - Carry Forward Position Sell  
                     col14_val = float(row.iloc[14]) if pd.notna(row.iloc[14]) else 0.0
                 except (ValueError, TypeError):
                     col14_val = 0.0
                 
-                # Position = Buy - Sell (columns 13 - 14)
                 position_lots = col13_val - col14_val
                 
                 if position_lots == 0:
                     continue
                 
-                # Determine instrument type based on series and option_type
-                # FUTIDX/FUTSTK = Futures, OPTIDX/OPTSTK = Options
                 series_upper = series.upper()
                 if 'FUT' in series_upper:
-                    inst_type = 'FF'  # Futures
+                    inst_type = 'FF'
                 elif 'OPT' in series_upper:
-                    # For options, use the option_type (CE or PE)
-                    inst_type = option_type  # CE or PE
+                    inst_type = option_type
                 else:
-                    # If series doesn't indicate type, use option_type if present
                     inst_type = option_type if option_type else 'FF'
                 
                 position = self._create_position(
@@ -313,7 +287,6 @@ class InputParser:
                 
                 contract_id = str(row[3]).strip() if pd.notna(row[3]) else ""
                 
-                # Handle both stock and index contracts
                 if not contract_id or not ('FUTSTK' in contract_id or 'OPTSTK' in contract_id 
                                           or 'FUTIDX' in contract_id or 'OPTIDX' in contract_id):
                     continue
@@ -356,20 +329,17 @@ class InputParser:
         for idx in range(len(df)):
             try:
                 row = df.iloc[idx]
-                if len(row) < 21:  # Need at least 21 columns for col 20 and 21
+                if len(row) < 21:
                     continue
                 
                 contract_id = str(row[0]).strip() if pd.notna(row[0]) else ""
                 
-                # Skip rows that don't have a valid contract ID pattern
                 if not contract_id or '-' not in contract_id:
                     continue
                 
-                # Skip header rows or summary rows
                 if any(keyword in contract_id.lower() for keyword in ['total', 'summary', 'net', 'mtm', 'payable', 'receivable']):
                     continue
                 
-                # Calculate position as column 20 - column 21 (indices 19 - 20)
                 try:
                     col20_val = float(row[19]) if pd.notna(row[19]) else 0.0
                 except (ValueError, TypeError):
@@ -380,7 +350,6 @@ class InputParser:
                 except (ValueError, TypeError):
                     col21_val = 0.0
                 
-                # Position = Column 20 - Column 21
                 position_lots = col20_val - col21_val
                 
                 if position_lots == 0:
@@ -388,7 +357,6 @@ class InputParser:
                 
                 parsed = self._parse_contract_id(contract_id)
                 if parsed:
-                    # MS format always passes None for lot_size to use mapping file
                     position = self._create_position(
                         parsed['symbol'], parsed['expiry'], parsed['strike'],
                         parsed['inst_type'], position_lots, None, parsed['series']
@@ -408,7 +376,7 @@ class InputParser:
     def _find_data_start_bod(self, df: pd.DataFrame) -> int:
         """Find where data starts in BOD format"""
         for i in range(min(100, len(df))):
-            if len(df.iloc[i]) < 15:  # Changed from 16 to 15
+            if len(df.iloc[i]) < 15:
                 continue
             
             col5_val = str(df.iloc[i, 4]).strip() if pd.notna(df.iloc[i, 4]) else ""
@@ -418,7 +386,6 @@ class InputParser:
             try:
                 if pd.notna(df.iloc[i, 4]):
                     float(df.iloc[i, 4])
-                # Check columns 13 and 14 instead of column 15
                 if pd.notna(df.iloc[i, 13]) or pd.notna(df.iloc[i, 14]):
                     float(df.iloc[i, 13] if pd.notna(df.iloc[i, 13]) else 0)
                     float(df.iloc[i, 14] if pd.notna(df.iloc[i, 14]) else 0)
@@ -428,7 +395,7 @@ class InputParser:
         return 0
     
     def _parse_contract_id(self, contract_id: str) -> Optional[Dict]:
-        """Parse contract ID string - handles both stock and index contracts"""
+        """Parse contract ID string"""
         try:
             contract_id = contract_id.strip()
             if contract_id.endswith(' -0'):
@@ -440,7 +407,7 @@ class InputParser:
             if len(parts) < 5:
                 return None
             
-            series = parts[0]  # FUTSTK, OPTSTK, FUTIDX, OPTIDX
+            series = parts[0]
             strike_str = parts[-1].replace(',', '')
             inst_type = parts[-2]
             expiry_str = parts[-3]
@@ -497,37 +464,42 @@ class InputParser:
                 'expiry': expiry,
                 'position_lots': position_lots
             })
+            logger.warning(f"No mapping found for symbol: {symbol}")
             return None
         
-        # Determine security type - handle both stock and index instruments
+        # Determine security type
         inst_type = inst_type.upper()
         series_upper = series.upper() if series else ''
         
-        # Check if it's a future based on inst_type or series
         if inst_type == 'FF' or 'FUT' in inst_type or 'FUT' in series_upper:
             security_type = 'Futures'
-        elif inst_type in ['CE', 'C', 'CALL'] or (inst_type == 'CE'):
+        elif inst_type in ['CE', 'C', 'CALL']:
             security_type = 'Call'
-        elif inst_type in ['PE', 'P', 'PUT'] or (inst_type == 'PE'):
+        elif inst_type in ['PE', 'P', 'PUT']:
             security_type = 'Put'
         else:
-            # If we can't determine type, skip this position
             logger.debug(f"Could not determine security type for {symbol} with inst_type={inst_type}, series={series}")
             return None
         
-        bloomberg_ticker = self._generate_bloomberg_ticker(
-            mapping['ticker'], expiry, security_type, strike
+        # Use the unified ticker generator
+        bloomberg_ticker = generate_bloomberg_ticker(
+            ticker=mapping['ticker'],
+            expiry=expiry,
+            security_type=security_type,
+            strike=strike,
+            series=series,
+            original_symbol=symbol
         )
         
-        # Handle lot_size: Use provided value, or mapping value, or 1 if both are None/blank
+        # Handle lot_size
         if lot_size is not None:
             final_lot_size = lot_size
         else:
-            # For MS format (lot_size is None), use mapping file value
             final_lot_size = mapping.get('lot_size', 1)
-            # If mapping has no lot_size or it's 0, use 1 as default
             if not final_lot_size or final_lot_size == 0:
                 final_lot_size = 1
+        
+        logger.debug(f"Created position: {symbol} -> {bloomberg_ticker}")
         
         return Position(
             underlying_ticker=mapping['underlying'],
@@ -539,40 +511,3 @@ class InputParser:
             strike_price=strike,
             lot_size=final_lot_size
         )
-    
-    def _generate_bloomberg_ticker(self, ticker: str, expiry: datetime,
-                                  security_type: str, strike: float) -> str:
-        """Generate Bloomberg ticker"""
-        # Check if this is an index ticker (ends with Index or contains specific index names)
-        ticker_upper = ticker.upper()
-        is_index = (ticker_upper in ['NZ', 'NBZ', 'NIFTY', 'BANKNIFTY', 'NF', 'NBF', 'FNF', 'FINNIFTY', 'MCN', 'MIDCPNIFTY'] 
-                   or 'NIFTY' in ticker_upper 
-                   or ticker_upper.endswith('INDEX'))
-        
-        if security_type == 'Futures':
-            month_code = MONTH_CODE.get(expiry.month, "")
-            year_code = str(expiry.year)[-1]
-            
-            if is_index:
-                # Index futures format: NZU5 Index (no = sign, no space)
-                return f"{ticker}{month_code}{year_code} Index"
-            else:
-                # Stock futures format: RIL=H5 IS Equity (= sign, no space)
-                return f"{ticker}={month_code}{year_code} IS Equity"
-        else:
-            date_str = expiry.strftime('%m/%d/%y')
-            strike_str = str(int(strike)) if strike == int(strike) else str(strike)
-            
-            if is_index:
-                # Index options format: NZ 03/27/25 C21000 Index
-                if security_type == 'Call':
-                    return f"{ticker} {date_str} C{strike_str} Index"
-                else:
-                    return f"{ticker} {date_str} P{strike_str} Index"
-            else:
-                # Stock options format: RIL IS 03/27/25 C1200 Equity
-                if security_type == 'Call':
-                    return f"{ticker} IS {date_str} C{strike_str} Equity"
-                else:
-                    return f"{ticker} IS {date_str} P{strike_str} Equity"
-
