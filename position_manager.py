@@ -1,6 +1,6 @@
 """
-Position Manager Module
-Manages position tracking and updates throughout trade processing
+Position Manager Module - FIXED VERSION
+Correctly maintains strategy when positions flip
 """
 
 from dataclasses import dataclass
@@ -14,37 +14,32 @@ logger = logging.getLogger(__name__)
 class PositionState:
     """Represents current position state for a ticker"""
     ticker: str
-    quantity: float  # in lots
+    quantity: float  # in lots (positive for long, negative for short)
     strategy: str  # FULO or FUSH
     security_type: str  # Futures, Call, Put
     
-    def get_directional_quantity(self) -> float:
-        """Get directional quantity accounting for put inversions"""
-        if self.security_type == 'Put':
-            # For puts: positive quantity with FUSH = short exposure
-            #          negative quantity with FULO = long exposure
-            return self.quantity
-        else:
-            # For futures/calls: straightforward
-            return self.quantity
-    
     def update_position(self, trade_quantity: float) -> 'PositionState':
-        """Update position after a trade"""
+        """
+        Update position after a trade
+        IMPORTANT: Strategy only changes when position flips sign
+        """
         new_quantity = self.quantity + trade_quantity
         
-        # Determine new strategy if position flips
-        if self.quantity > 0 and new_quantity < 0:
-            # Flipped from long to short
-            if self.security_type == 'Put':
-                new_strategy = 'FULO'  # Short put = long exposure
+        # Determine new strategy ONLY if position flips sign
+        if (self.quantity > 0 and new_quantity < 0) or (self.quantity < 0 and new_quantity > 0):
+            # Position flipped - determine new strategy based on NEW position
+            if new_quantity > 0:
+                # Now long
+                if self.security_type == 'Put':
+                    new_strategy = 'FUSH'  # Long put = short exposure
+                else:
+                    new_strategy = 'FULO'  # Long futures/call = long exposure
             else:
-                new_strategy = 'FUSH'  # Short futures/call = short exposure
-        elif self.quantity < 0 and new_quantity > 0:
-            # Flipped from short to long
-            if self.security_type == 'Put':
-                new_strategy = 'FUSH'  # Long put = short exposure
-            else:
-                new_strategy = 'FULO'  # Long futures/call = long exposure
+                # Now short
+                if self.security_type == 'Put':
+                    new_strategy = 'FULO'  # Short put = long exposure
+                else:
+                    new_strategy = 'FUSH'  # Short futures/call = short exposure
         else:
             # No flip, keep same strategy
             new_strategy = self.strategy
@@ -90,11 +85,11 @@ class PositionManager:
             
             pos_state = PositionState(
                 ticker=ticker_key,
-                quantity=position.position_lots,
+                quantity=position.position_lots,  # Keep the sign
                 strategy=strategy,
                 security_type=position.security_type
             )
-                
+            
             self.positions[ticker_key] = pos_state
             self.initial_positions[ticker_key] = pos_state
             
@@ -110,18 +105,34 @@ class PositionManager:
         return self.positions.get(ticker)
     
     def update_position(self, ticker: str, trade_quantity: float, security_type: str):
-        """Update position after processing a trade"""
+        """
+        Update position after processing a trade
+        IMPORTANT: This should be called AFTER the trade has been processed
+        """
         if ticker in self.positions:
             # Update existing position
             old_pos = self.positions[ticker]
             new_pos = old_pos.update_position(trade_quantity)
             self.positions[ticker] = new_pos
+            
+            logger.debug(f"Position update for {ticker}:")
+            logger.debug(f"  Old: {old_pos.quantity} ({old_pos.strategy})")
+            logger.debug(f"  Trade: {trade_quantity}")
+            logger.debug(f"  New: {new_pos.quantity} ({new_pos.strategy})")
         else:
             # Create new position
-            if security_type == 'Put':
-                strategy = 'FUSH' if trade_quantity > 0 else 'FULO'
+            if trade_quantity > 0:
+                # Long position
+                if security_type == 'Put':
+                    strategy = 'FUSH'  # Long put = short exposure
+                else:
+                    strategy = 'FULO'  # Long futures/call = long exposure
             else:
-                strategy = 'FULO' if trade_quantity > 0 else 'FUSH'
+                # Short position
+                if security_type == 'Put':
+                    strategy = 'FULO'  # Short put = long exposure
+                else:
+                    strategy = 'FUSH'  # Short futures/call = short exposure
             
             self.positions[ticker] = PositionState(
                 ticker=ticker,
@@ -129,6 +140,8 @@ class PositionManager:
                 strategy=strategy,
                 security_type=security_type
             )
+            
+            logger.debug(f"New position for {ticker}: {trade_quantity} ({strategy})")
     
     def get_final_positions(self) -> pd.DataFrame:
         """Get final positions as DataFrame"""
@@ -143,14 +156,15 @@ class PositionManager:
         return pd.DataFrame(final_positions)
     
     def is_trade_opposing(self, ticker: str, trade_quantity: float, security_type: str) -> bool:
-        """Check if trade opposes current position"""
+        """
+        Check if trade opposes current position
+        A trade opposes if it reduces the absolute position size
+        """
         pos = self.get_position(ticker)
         if not pos:
             return False
         
-        # For futures/calls: buy (+) vs short position (-) or sell (-) vs long position (+)
-        # For puts: logic is same at position level
-        if pos.quantity > 0:
-            return trade_quantity < 0  # Long position, sell trade
-        else:
-            return trade_quantity > 0  # Short position, buy trade
+        # Trade opposes if signs are different
+        # Long position (positive) vs Sell trade (negative)
+        # Short position (negative) vs Buy trade (positive)
+        return (pos.quantity > 0 and trade_quantity < 0) or (pos.quantity < 0 and trade_quantity > 0)
