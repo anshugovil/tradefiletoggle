@@ -1,5 +1,5 @@
 """
-Trade Parser Module - FIXED FOR SEQUENTIAL PROCESSING
+Trade Parser Module - Updated with MIDCPNIFTY mapping
 NO AGGREGATION - Each trade line processed individually
 """
 
@@ -44,7 +44,7 @@ MONTH_CODE = {
     7: "N", 8: "Q", 9: "U", 10: "V", 11: "X", 12: "Z"
 }
 
-# Special index ticker mappings
+# Special index ticker mappings - UPDATED WITH MIDCPNIFTY
 INDEX_TICKER_RULES = {
     'NIFTY': {
         'futures_ticker': 'NZ',
@@ -74,6 +74,26 @@ INDEX_TICKER_RULES = {
     'NSEBANK': {
         'futures_ticker': 'AF1',
         'options_ticker': 'NSEBANK',
+        'is_index': True
+    },
+    'MIDCPNIFTY': {
+        'futures_ticker': 'RNS',
+        'options_ticker': 'NMIDSELP',
+        'is_index': True
+    },
+    'RNS': {
+        'futures_ticker': 'RNS',
+        'options_ticker': 'NMIDSELP',
+        'is_index': True
+    },
+    'NMIDSELP': {
+        'futures_ticker': 'RNS',
+        'options_ticker': 'NMIDSELP',
+        'is_index': True
+    },
+    'MCN': {
+        'futures_ticker': 'RNS',
+        'options_ticker': 'NMIDSELP',
         'is_index': True
     }
 }
@@ -371,14 +391,14 @@ class TradeParser:
         """Generate Bloomberg ticker format"""
         ticker_upper = ticker.upper()
         
-        # Check if index
+        # Check if index - UPDATED WITH NEW TICKERS
         is_index = False
         if series:
             series_upper = series.upper()
             if 'IDX' in series_upper:
                 is_index = True
         
-        if ticker_upper in ['NZ', 'NBZ', 'NIFTY', 'BANKNIFTY', 'AF1', 'NSEBANK'] or 'NIFTY' in ticker_upper:
+        if ticker_upper in ['NZ', 'NBZ', 'NIFTY', 'BANKNIFTY', 'AF1', 'NSEBANK', 'RNS', 'NMIDSELP', 'MCN', 'MIDCPNIFTY'] or 'NIFTY' in ticker_upper:
             is_index = True
         
         if security_type == 'Futures':
