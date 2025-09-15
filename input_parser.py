@@ -1,5 +1,5 @@
 """
-Input Parser Module - MATCHING TRADE PARSER VERSION
+Input Parser Module - Updated with MIDCPNIFTY mapping
 Uses same ticker generation logic as Trade_Parser for consistency
 """
 
@@ -24,7 +24,7 @@ MONTH_CODE = {
     7: "N", 8: "Q", 9: "U", 10: "V", 11: "X", 12: "Z"
 }
 
-# Special index ticker mappings - SAME AS TRADE PARSER
+# Special index ticker mappings - UPDATED WITH MIDCPNIFTY
 INDEX_TICKER_RULES = {
     'NIFTY': {
         'futures_ticker': 'NZ',
@@ -54,6 +54,26 @@ INDEX_TICKER_RULES = {
     'NSEBANK': {
         'futures_ticker': 'AF1',
         'options_ticker': 'NSEBANK',
+        'is_index': True
+    },
+    'MIDCPNIFTY': {
+        'futures_ticker': 'RNS',
+        'options_ticker': 'NMIDSELP',
+        'is_index': True
+    },
+    'RNS': {
+        'futures_ticker': 'RNS',
+        'options_ticker': 'NMIDSELP',
+        'is_index': True
+    },
+    'NMIDSELP': {
+        'futures_ticker': 'RNS',
+        'options_ticker': 'NMIDSELP',
+        'is_index': True
+    },
+    'MCN': {
+        'futures_ticker': 'RNS',
+        'options_ticker': 'NMIDSELP',
         'is_index': True
     }
 }
@@ -148,7 +168,7 @@ class InputParser:
     
     def _get_index_ticker(self, symbol: str, security_type: str) -> Optional[Dict]:
         """
-        Get special ticker mapping for index futures vs options - SAME AS TRADE PARSER
+        Get special ticker mapping for index futures vs options
         Returns None if no special rule applies
         """
         symbol_upper = symbol.upper()
@@ -614,8 +634,8 @@ class InputParser:
             if 'IDX' in series_upper:  # FUTIDX, OPTIDX
                 is_index = True
         
-        # Also check ticker itself
-        if ticker_upper in ['NZ', 'NBZ', 'NIFTY', 'BANKNIFTY', 'AF1', 'NSEBANK'] or 'NIFTY' in ticker_upper:
+        # Also check ticker itself - UPDATED WITH NEW TICKERS
+        if ticker_upper in ['NZ', 'NBZ', 'NIFTY', 'BANKNIFTY', 'AF1', 'NSEBANK', 'RNS', 'NMIDSELP', 'MCN', 'MIDCPNIFTY'] or 'NIFTY' in ticker_upper:
             is_index = True
         
         if security_type == 'Futures':
