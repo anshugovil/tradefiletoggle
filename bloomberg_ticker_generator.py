@@ -57,13 +57,23 @@ INDEX_TICKER_RULES = {
         'is_index': True
     },
     'MIDCPNIFTY': {
-        'futures_ticker': 'MCN',
-        'options_ticker': 'MIDCPNIFTY',
+        'futures_ticker': 'RNS',
+        'options_ticker': 'NMIDSELP',
+        'is_index': True
+    },
+    'RNS': {
+        'futures_ticker': 'RNS',
+        'options_ticker': 'NMIDSELP',
+        'is_index': True
+    },
+    'NMIDSELP': {
+        'futures_ticker': 'RNS',
+        'options_ticker': 'NMIDSELP',
         'is_index': True
     },
     'MCN': {
-        'futures_ticker': 'MCN',
-        'options_ticker': 'MIDCPNIFTY',
+        'futures_ticker': 'RNS',
+        'options_ticker': 'NMIDSELP',
         'is_index': True
     }
 }
@@ -71,7 +81,7 @@ INDEX_TICKER_RULES = {
 # Known index tickers (for detection)
 INDEX_TICKERS = {
     'NZ', 'NBZ', 'NIFTY', 'BANKNIFTY', 'NF', 'NBF', 'FNF', 'FINNIFTY', 
-    'MCN', 'MIDCPNIFTY', 'AF', 'AF1', 'NSEBANK'
+    'MCN', 'MIDCPNIFTY', 'AF', 'AF1', 'NSEBANK', 'RNS', 'NMIDSELP'
 }
 
 
