@@ -1,7 +1,6 @@
 """
-Trade Parser Module - FIXED VERSION
-Handles parsing of GS and MS trade files and converts them to position format
-Uses unified Bloomberg ticker generation
+Trade Parser Module - FIXED FOR SEQUENTIAL PROCESSING
+NO AGGREGATION - Each trade line processed individually
 """
 
 import pandas as pd
@@ -12,20 +11,17 @@ import re
 import logging
 from dataclasses import dataclass
 
-# Import the unified ticker generator
-from bloomberg_ticker_generator import generate_bloomberg_ticker, is_index_instrument
-
 logger = logging.getLogger(__name__)
 
-# Define Position class locally to avoid import issues
+# Define Position class locally
 @dataclass
 class Position:
-    """Represents a single position"""
+    """Represents a single trade (not aggregated position)"""
     underlying_ticker: str
     bloomberg_ticker: str
     symbol: str
     expiry_date: datetime
-    position_lots: float
+    position_lots: float  # This is the trade quantity with sign
     security_type: str  # Futures, Call, Put
     strike_price: float
     lot_size: int
@@ -42,9 +38,49 @@ class Position:
     def is_put(self) -> bool:
         return self.security_type == 'Put'
 
+# Constants
+MONTH_CODE = {
+    1: "F", 2: "G", 3: "H", 4: "J", 5: "K", 6: "M",
+    7: "N", 8: "Q", 9: "U", 10: "V", 11: "X", 12: "Z"
+}
+
+# Special index ticker mappings
+INDEX_TICKER_RULES = {
+    'NIFTY': {
+        'futures_ticker': 'NZ',
+        'options_ticker': 'NIFTY',
+        'is_index': True
+    },
+    'NZ': {
+        'futures_ticker': 'NZ',
+        'options_ticker': 'NIFTY',
+        'is_index': True
+    },
+    'BANKNIFTY': {
+        'futures_ticker': 'AF1',
+        'options_ticker': 'NSEBANK',
+        'is_index': True
+    },
+    'AF1': {
+        'futures_ticker': 'AF1',
+        'options_ticker': 'NSEBANK',
+        'is_index': True
+    },
+    'AF': {
+        'futures_ticker': 'AF1',
+        'options_ticker': 'NSEBANK',
+        'is_index': True
+    },
+    'NSEBANK': {
+        'futures_ticker': 'AF1',
+        'options_ticker': 'NSEBANK',
+        'is_index': True
+    }
+}
+
 
 class TradeParser:
-    """Parser for trade files (GS and MS formats)"""
+    """Parser for trade files - NO AGGREGATION VERSION"""
     
     def __init__(self, mapping_file: str = "futures mapping.csv"):
         self.mapping_file = mapping_file
@@ -65,17 +101,14 @@ class TradeParser:
                     symbol = str(row.iloc[0]).strip()
                     ticker = str(row.iloc[1]).strip()
                     
-                    # Handle underlying (column 3)
                     underlying = None
                     if len(row) > 2 and pd.notna(row.iloc[2]):
                         underlying_val = str(row.iloc[2]).strip()
                         if underlying_val and underlying_val.upper() != 'NAN':
                             underlying = underlying_val
                     
-                    # If no underlying specified, create default
                     if not underlying:
-                        # Use the unified function to check if it's an index
-                        if is_index_instrument(symbol):
+                        if symbol.upper() in ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY']:
                             underlying = f"{symbol.upper()} INDEX"
                         else:
                             underlying = f"{ticker} IS Equity"
@@ -105,13 +138,32 @@ class TradeParser:
             
         return mappings
     
+    def _get_index_ticker(self, symbol: str, security_type: str) -> Optional[Dict]:
+        """Get special ticker mapping for index futures vs options"""
+        symbol_upper = symbol.upper()
+        
+        if symbol_upper in INDEX_TICKER_RULES:
+            rule = INDEX_TICKER_RULES[symbol_upper]
+            
+            if security_type == 'Futures':
+                return {
+                    'ticker': rule['futures_ticker'],
+                    'underlying': rule.get('underlying', f"{symbol_upper} INDEX"),
+                    'lot_size': 50 if 'NIFTY' in symbol_upper else 15
+                }
+            else:  # Options
+                return {
+                    'ticker': rule['options_ticker'],
+                    'underlying': rule.get('underlying', f"{symbol_upper} INDEX"),
+                    'lot_size': 50 if 'NIFTY' in symbol_upper else 15
+                }
+        
+        return None
+    
     def detect_format(self, df: pd.DataFrame) -> str:
         """Detect if it's MS or GS trade format"""
-        # MS format detection - 14 columns, specific structure
         if df.shape[1] == 14:
-            # Check for MS column structure
             try:
-                # MS has Instr in column 4 (index 4)
                 col4_vals = df.iloc[:, 4].dropna().astype(str).str.upper()
                 if any(val in ['OPTSTK', 'OPTIDX', 'FUTSTK', 'FUTIDX'] for val in col4_vals):
                     logger.info("Detected MS trade format (14 columns)")
@@ -119,13 +171,11 @@ class TradeParser:
             except:
                 pass
         
-        # GS format detection - needs to be implemented based on actual GS structure
-        # For now, if not MS, assume GS
         logger.info("Detected GS trade format (non-MS structure)")
         return 'GS'
     
     def parse_trade_file(self, file_path: str) -> List[Position]:
-        """Parse trade file and convert to positions"""
+        """Parse trade file - RETURN EACH TRADE LINE INDIVIDUALLY"""
         try:
             # Read file
             if file_path.endswith('.csv'):
@@ -133,11 +183,10 @@ class TradeParser:
             else:
                 df = pd.read_excel(file_path, header=None if self._has_no_header(file_path) else 0)
             
-            # Detect format
             self.format_type = self.detect_format(df)
             
             if self.format_type == 'MS':
-                return self._parse_ms_trades(df)
+                return self._parse_ms_trades_sequential(df)
             else:
                 return self._parse_gs_trades(df)
         except Exception as e:
@@ -152,42 +201,56 @@ class TradeParser:
             else:
                 first_row = pd.read_excel(file_path, nrows=1)
             
-            # If first row has strings like 'Symbol', 'Expiry', etc., it's likely headers
             first_vals = first_row.iloc[0].astype(str)
             header_keywords = ['symbol', 'expiry', 'strike', 'option', 'instr', 'qty', 'price']
             if any(keyword in str(first_vals).lower() for keyword in header_keywords):
-                return False  # Has headers
-            return True  # No headers
+                return False
+            return True
         except:
-            return True  # Assume no headers if can't determine
+            return True
     
-    def _parse_ms_trades(self, df: pd.DataFrame) -> List[Position]:
-        """Parse MS format trade file"""
-        positions_map = {}
+    def _parse_ms_trades_sequential(self, df: pd.DataFrame) -> List[Position]:
+        """
+        Parse MS format trade file - EACH LINE INDIVIDUALLY
+        NO AGGREGATION - Returns trades in order they appear
+        """
+        trades = []  # List of individual trades, not aggregated
         
-        # MS format columns (0-indexed):
-        # 4: Instr (OPTSTK/OPTIDX/FUTSTK/FUTIDX)
-        # 5: Symbol
-        # 6: Expiry Dt
-        # 7: Lot Size
-        # 8: Strike Price
-        # 9: Option Type (CE/PE)
-        # 10: B/S (Buy/Sell)
-        # 12: Lots Traded
+        # Check if first row is headers
+        start_row = 0
+        if df.shape[0] > 0:
+            first_row = df.iloc[0]
+            if any(str(val).lower() in ['symbol', 'expiry', 'strike'] for val in first_row if pd.notna(val)):
+                start_row = 1
+                logger.info("Skipping header row in trade file")
         
-        for idx in range(len(df)):
+        # Process each row as a separate trade
+        for idx in range(start_row, len(df)):
             try:
                 row = df.iloc[idx]
                 
-                # Skip if not enough columns
                 if len(row) < 14:
                     continue
+                
+                # MS format columns:
+                # 4: Instr (OPTSTK/OPTIDX/FUTSTK/FUTIDX)
+                # 5: Symbol
+                # 6: Expiry Dt
+                # 7: Lot Size
+                # 8: Strike Price
+                # 9: Option Type (CE/PE)
+                # 10: B/S (Buy/Sell)
+                # 11: Qty
+                # 12: Lots Traded
                 
                 instr = str(row.iloc[4]).strip().upper() if pd.notna(row.iloc[4]) else ""
                 if instr not in ['OPTSTK', 'OPTIDX', 'FUTSTK', 'FUTIDX']:
                     continue
                 
                 symbol = str(row.iloc[5]).strip().upper() if pd.notna(row.iloc[5]) else ""
+                if not symbol:
+                    continue
+                    
                 expiry_str = str(row.iloc[6]).strip() if pd.notna(row.iloc[6]) else ""
                 lot_size = int(float(row.iloc[7])) if pd.notna(row.iloc[7]) else 1
                 strike = float(row.iloc[8]) if pd.notna(row.iloc[8]) else 0
@@ -206,7 +269,7 @@ class TradeParser:
                 # Determine security type
                 if 'FUT' in instr:
                     security_type = 'Futures'
-                    strike = 0  # Futures don't have strikes
+                    strike = 0
                 elif option_type in ['CE', 'C', 'CALL']:
                     security_type = 'Call'
                 elif option_type in ['PE', 'P', 'PUT']:
@@ -214,95 +277,81 @@ class TradeParser:
                 else:
                     continue
                 
-                # Determine position sign (BUY = positive, SELL = negative)
+                # Determine trade direction
                 if side.startswith('B'):
-                    position_lots = lots
+                    trade_lots = lots  # Positive for buy
                 elif side.startswith('S'):
-                    position_lots = -lots
+                    trade_lots = -lots  # Negative for sell
                 else:
                     continue
                 
-                # Get mapping from file
-                symbol_normalized = symbol.strip().upper()
-                mapping = None
-                if symbol in self.symbol_mappings:
-                    mapping = self.symbol_mappings[symbol]
-                elif symbol_normalized in self.normalized_mappings:
-                    mapping = self.normalized_mappings[symbol_normalized]
+                # Get mapping - check special rules first
+                special_mapping = self._get_index_ticker(symbol, security_type)
                 
-                if not mapping:
-                    logger.warning(f"No mapping found for symbol: {symbol}")
-                    self.unmapped_symbols.append({
-                        'symbol': symbol,
-                        'expiry': expiry,
-                        'position_lots': position_lots
-                    })
-                    continue
+                if special_mapping:
+                    mapping = special_mapping
+                    mapping['original_symbol'] = symbol
+                    mapping['lot_size'] = lot_size  # Use trade file lot size
+                else:
+                    # Get regular mapping
+                    symbol_normalized = symbol.strip().upper()
+                    mapping = None
+                    if symbol in self.symbol_mappings:
+                        mapping = self.symbol_mappings[symbol]
+                    elif symbol_normalized in self.normalized_mappings:
+                        mapping = self.normalized_mappings[symbol_normalized]
+                    
+                    if not mapping:
+                        logger.warning(f"No mapping found for symbol: {symbol}")
+                        self.unmapped_symbols.append({
+                            'symbol': symbol,
+                            'expiry': expiry,
+                            'position_lots': trade_lots
+                        })
+                        continue
                 
-                # Use the unified ticker generator
-                bloomberg_ticker = generate_bloomberg_ticker(
-                    ticker=mapping['ticker'],
-                    expiry=expiry,
-                    security_type=security_type,
-                    strike=strike,
-                    series=instr,  # Pass the instrument type as series
-                    original_symbol=symbol
+                # Generate Bloomberg ticker
+                bloomberg_ticker = self._generate_bloomberg_ticker(
+                    mapping['ticker'], expiry, security_type, strike, instr
                 )
                 
-                logger.debug(f"Trade: {symbol} -> {bloomberg_ticker}")
+                # Create trade object (NOT aggregated position)
+                trade = Position(
+                    underlying_ticker=mapping.get('underlying', f"{mapping['ticker']} IS Equity"),
+                    bloomberg_ticker=bloomberg_ticker,
+                    symbol=symbol,
+                    expiry_date=expiry,
+                    position_lots=trade_lots,  # Individual trade quantity with sign
+                    security_type=security_type,
+                    strike_price=strike,
+                    lot_size=lot_size
+                )
                 
-                # Create unique key for aggregation
-                key = (mapping['underlying'], bloomberg_ticker, symbol, expiry, security_type, strike, lot_size)
-                
-                # Aggregate positions
-                if key in positions_map:
-                    positions_map[key] += position_lots
-                else:
-                    positions_map[key] = position_lots
+                trades.append(trade)
+                logger.debug(f"Trade {idx}: {symbol} {side} {lots} lots -> {bloomberg_ticker}")
                     
             except Exception as e:
                 logger.debug(f"Error parsing MS trade row {idx}: {e}")
         
-        # Convert to Position objects
-        positions = []
-        for (underlying, bloomberg, symbol, expiry, sec_type, strike, lot_size), lots in positions_map.items():
-            positions.append(Position(
-                underlying_ticker=underlying,
-                bloomberg_ticker=bloomberg,
-                symbol=symbol,
-                expiry_date=expiry,
-                position_lots=lots,
-                security_type=sec_type,
-                strike_price=strike,
-                lot_size=lot_size
-            ))
-        
-        logger.info(f"Parsed {len(positions)} net positions from MS trades")
-        return positions
+        logger.info(f"Parsed {len(trades)} individual trades (not aggregated)")
+        return trades
     
     def _parse_gs_trades(self, df: pd.DataFrame) -> List[Position]:
-        """Parse GS format trade file - to be implemented based on actual format"""
-        positions_map = {}
-        
-        # GS format parsing logic
-        # This needs to be implemented based on actual GS file structure
-        # For now, returning empty list
-        
-        logger.warning("GS format parsing not yet fully implemented")
+        """Parse GS format trade file"""
+        logger.warning("GS format parsing not yet implemented")
         return []
     
     def _parse_date(self, date_str: str) -> Optional[datetime]:
         """Parse date string in various formats"""
         date_str = str(date_str).strip()
         
-        # Try different date formats
         formats = [
             '%d/%m/%Y', '%d-%m-%Y', '%d.%m.%Y',
             '%m/%d/%Y', '%m-%d-%Y', '%m.%d.%Y',
             '%Y-%m-%d', '%Y/%m/%d', '%Y.%m.%d',
             '%d/%m/%y', '%d-%m-%y', '%d.%m.%y',
             '%m/%d/%y', '%m-%d-%y', '%m.%d.%y',
-            '%d-%b-%Y', '%d-%b-%y',  # For formats like 26-Sep-2025
+            '%d-%b-%Y', '%d-%b-%y',
         ]
         
         for fmt in formats:
@@ -311,8 +360,46 @@ class TradeParser:
             except:
                 continue
         
-        # Try pandas parser as fallback
         try:
             return pd.to_datetime(date_str)
         except:
             return None
+    
+    def _generate_bloomberg_ticker(self, ticker: str, expiry: datetime,
+                                  security_type: str, strike: float,
+                                  series: str = None) -> str:
+        """Generate Bloomberg ticker format"""
+        ticker_upper = ticker.upper()
+        
+        # Check if index
+        is_index = False
+        if series:
+            series_upper = series.upper()
+            if 'IDX' in series_upper:
+                is_index = True
+        
+        if ticker_upper in ['NZ', 'NBZ', 'NIFTY', 'BANKNIFTY', 'AF1', 'NSEBANK'] or 'NIFTY' in ticker_upper:
+            is_index = True
+        
+        if security_type == 'Futures':
+            month_code = MONTH_CODE.get(expiry.month, "")
+            year_code = str(expiry.year)[-1]
+            
+            if is_index:
+                return f"{ticker}{month_code}{year_code} Index"
+            else:
+                return f"{ticker}={month_code}{year_code} IS Equity"
+        else:
+            date_str = expiry.strftime('%m/%d/%y')
+            strike_str = str(int(strike)) if strike == int(strike) else str(strike)
+            
+            if is_index:
+                if security_type == 'Call':
+                    return f"{ticker} {date_str} C{strike_str} Index"
+                else:
+                    return f"{ticker} {date_str} P{strike_str} Index"
+            else:
+                if security_type == 'Call':
+                    return f"{ticker} IS {date_str} C{strike_str} Equity"
+                else:
+                    return f"{ticker} IS {date_str} P{strike_str} Equity"
