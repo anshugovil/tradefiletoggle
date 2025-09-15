@@ -1,6 +1,6 @@
 """
-Trade Processor Module - COMPLETE FIXED VERSION
-Correctly assigns strategies when closing positions and tracks strategy changes
+Trade Processor Module - FIXED QTY CALCULATION VERSION
+Correctly assigns strategies and calculates QTY as lots * lot_size to avoid decimals
 """
 
 import pandas as pd
@@ -22,6 +22,7 @@ class ProcessedTrade:
     is_opposite: bool
     split_lots: float
     split_qty: float
+    lot_size: int  # Added to track lot size
 
 
 class TradeProcessor:
@@ -107,6 +108,7 @@ class TradeProcessor:
         ticker = trade.bloomberg_ticker
         trade_quantity = trade.position_lots  # Has sign
         security_type = trade.security_type
+        lot_size = trade.lot_size
         
         # Get current position
         position = self.position_manager.get_position(ticker)
@@ -114,6 +116,9 @@ class TradeProcessor:
         if position is None:
             # NEW POSITION - no existing position
             strategy = self._get_new_position_strategy(trade_quantity, security_type)
+            
+            # Calculate QTY as lots * lot_size (always whole number)
+            qty = abs(trade_quantity) * lot_size
             
             processed = ProcessedTrade(
                 original_row_index=row_index,
@@ -123,7 +128,8 @@ class TradeProcessor:
                 is_split=False,
                 is_opposite=False,  # New position, so no opposite
                 split_lots=abs(trade_quantity),
-                split_qty=abs(float(original_row.iloc[11]) if pd.notna(original_row.iloc[11]) else trade_quantity * trade.lot_size)
+                split_qty=qty,
+                lot_size=lot_size
             )
             
             # Update position with strategy
@@ -138,6 +144,9 @@ class TradeProcessor:
             strategy = position.strategy  # Keep position's strategy
             is_opposite = self._is_strategy_opposite_to_trade(strategy, trade_quantity, security_type)
             
+            # Calculate QTY as lots * lot_size
+            qty = abs(trade_quantity) * lot_size
+            
             processed = ProcessedTrade(
                 original_row_index=row_index,
                 original_trade=original_row.to_dict(),
@@ -146,7 +155,8 @@ class TradeProcessor:
                 is_split=False,
                 is_opposite=is_opposite,
                 split_lots=abs(trade_quantity),
-                split_qty=abs(float(original_row.iloc[11]) if pd.notna(original_row.iloc[11]) else trade_quantity * trade.lot_size)
+                split_qty=qty,
+                lot_size=lot_size
             )
             
             # Update position, keeping the same strategy
@@ -159,6 +169,9 @@ class TradeProcessor:
             strategy = position.strategy  # INHERIT position's strategy
             is_opposite = self._is_strategy_opposite_to_trade(strategy, trade_quantity, security_type)
             
+            # Calculate QTY as lots * lot_size
+            qty = abs(trade_quantity) * lot_size
+            
             processed = ProcessedTrade(
                 original_row_index=row_index,
                 original_trade=original_row.to_dict(),
@@ -167,7 +180,8 @@ class TradeProcessor:
                 is_split=False,
                 is_opposite=is_opposite,
                 split_lots=abs(trade_quantity),
-                split_qty=abs(float(original_row.iloc[11]) if pd.notna(original_row.iloc[11]) else trade_quantity * trade.lot_size)
+                split_qty=qty,
+                lot_size=lot_size
             )
             
             # Update position, keeping the same strategy (position not flipped)
@@ -183,20 +197,19 @@ class TradeProcessor:
         ticker = trade.bloomberg_ticker
         trade_quantity = trade.position_lots
         security_type = trade.security_type
+        lot_size = trade.lot_size
         
         # Calculate split quantities
         close_quantity = -position.quantity  # Opposite sign to close
         remaining_quantity = trade_quantity + position.quantity  # What's left after closing
         
-        # Calculate split ratios
-        total_lots = abs(trade_quantity)
+        # Calculate split lots
         close_lots = abs(position.quantity)
         open_lots = abs(remaining_quantity)
         
-        # Split QTY proportionally
-        total_qty = abs(float(original_row.iloc[11]) if pd.notna(original_row.iloc[11]) else trade_quantity * trade.lot_size)
-        close_qty = total_qty * (close_lots / total_lots)
-        open_qty = total_qty * (open_lots / total_lots)
+        # Calculate QTY as lots * lot_size (avoids decimals)
+        close_qty = close_lots * lot_size
+        open_qty = open_lots * lot_size
         
         # FIRST SPLIT - CLOSING EXISTING POSITION
         # This MUST inherit the position's strategy
@@ -211,10 +224,11 @@ class TradeProcessor:
             is_split=True,
             is_opposite=is_opposite_close,
             split_lots=close_lots,
-            split_qty=close_qty
+            split_qty=close_qty,
+            lot_size=lot_size
         )
         
-        logger.info(f"  Split 1 (close): {close_lots} lots, Strategy={close_strategy} (inherited from position)")
+        logger.info(f"  Split 1 (close): {close_lots} lots ({close_qty} qty), Strategy={close_strategy}")
         
         # Update position to zero (closing)
         self.position_manager.update_position(ticker, close_quantity, security_type, close_strategy)
@@ -232,13 +246,13 @@ class TradeProcessor:
             is_split=True,
             is_opposite=is_opposite_open,
             split_lots=open_lots,
-            split_qty=open_qty
+            split_qty=open_qty,
+            lot_size=lot_size
         )
         
-        logger.info(f"  Split 2 (open): {open_lots} lots, Strategy={new_strategy} (new position)")
+        logger.info(f"  Split 2 (open): {open_lots} lots ({open_qty} qty), Strategy={new_strategy}")
         
         # Update position with new position AND NEW STRATEGY
-        # This is the KEY FIX - we must update the strategy when position flips
         self.position_manager.update_position(ticker, remaining_quantity, security_type, new_strategy)
         
         return [processed_close, processed_open]
@@ -293,13 +307,22 @@ class TradeProcessor:
         for pt in processed_trades:
             row_dict = deepcopy(pt.original_trade)
             
-            # Update quantities for splits
+            # Update quantities for splits (QTY = lots * lot_size, no decimals)
             if pt.is_split:
                 buy_sell = str(row_dict.get(10, '')).upper()
                 sign = -1 if buy_sell.startswith('S') else 1
                 
-                row_dict[11] = pt.split_qty * sign
-                row_dict[12] = pt.split_lots * sign
+                # Use calculated QTY (lots * lot_size) instead of proportional split
+                row_dict[11] = pt.split_qty * sign  # QTY with sign
+                row_dict[12] = pt.split_lots * sign  # Lots with sign
+            else:
+                # For non-split trades, also ensure QTY is lots * lot_size
+                buy_sell = str(row_dict.get(10, '')).upper()
+                sign = -1 if buy_sell.startswith('S') else 1
+                
+                # Recalculate QTY to ensure no decimals
+                row_dict[11] = pt.split_qty * sign  # QTY = lots * lot_size
+                row_dict[12] = pt.split_lots * sign  # Lots
             
             # Add new columns
             row_dict['Strategy'] = pt.strategy
@@ -332,5 +355,22 @@ class TradeProcessor:
                 result_df[col] = None
         
         result_df = result_df[final_columns]
+        
+        # Log to verify no decimals in QTY
+        if has_headers and 'Qty' in result_df.columns:
+            qty_col = 'Qty'
+        elif 11 in result_df.columns:
+            qty_col = 11
+        else:
+            qty_col = None
+        
+        if qty_col and qty_col in result_df.columns:
+            qty_values = result_df[qty_col].dropna()
+            if len(qty_values) > 0:
+                has_decimals = any(val != int(val) for val in qty_values if pd.notna(val) and val != 0)
+                if has_decimals:
+                    logger.warning("Warning: Some QTY values still have decimals")
+                else:
+                    logger.info("✓ All QTY values are whole numbers")
         
         return result_df
