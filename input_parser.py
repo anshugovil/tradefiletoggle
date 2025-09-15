@@ -1,7 +1,6 @@
 """
-Input Parser Module - FIXED VERSION
-Handles parsing of different position file formats and symbol mapping
-Uses unified Bloomberg ticker generation
+Input Parser Module - MATCHING TRADE PARSER VERSION
+Uses same ticker generation logic as Trade_Parser for consistency
 """
 
 import pandas as pd
@@ -12,15 +11,52 @@ import re
 import logging
 from dataclasses import dataclass
 
-# Import the unified ticker generator
-from bloomberg_ticker_generator import generate_bloomberg_ticker, is_index_instrument
-
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# Constants
+MONTH_CODE = {
+    1: "F", 2: "G", 3: "H", 4: "J", 5: "K", 6: "M",
+    7: "N", 8: "Q", 9: "U", 10: "V", 11: "X", 12: "Z"
+}
+
+# Special index ticker mappings - SAME AS TRADE PARSER
+INDEX_TICKER_RULES = {
+    'NIFTY': {
+        'futures_ticker': 'NZ',
+        'options_ticker': 'NIFTY',
+        'is_index': True
+    },
+    'NZ': {
+        'futures_ticker': 'NZ',
+        'options_ticker': 'NIFTY',
+        'is_index': True
+    },
+    'BANKNIFTY': {
+        'futures_ticker': 'AF1',
+        'options_ticker': 'NSEBANK',
+        'is_index': True
+    },
+    'AF1': {
+        'futures_ticker': 'AF1',
+        'options_ticker': 'NSEBANK',
+        'is_index': True
+    },
+    'AF': {
+        'futures_ticker': 'AF1',
+        'options_ticker': 'NSEBANK',
+        'is_index': True
+    },
+    'NSEBANK': {
+        'futures_ticker': 'AF1',
+        'options_ticker': 'NSEBANK',
+        'is_index': True
+    }
+}
 
 @dataclass
 class Position:
@@ -79,8 +115,8 @@ class InputParser:
                     
                     # If no underlying specified, create default
                     if not underlying:
-                        # Use the unified function to check if it's an index
-                        if is_index_instrument(symbol):
+                        # Special handling for known indices
+                        if symbol.upper() in ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY']:
                             underlying = f"{symbol.upper()} INDEX"
                         else:
                             underlying = f"{ticker} IS Equity"
@@ -102,13 +138,40 @@ class InputParser:
                     normalized_mappings[symbol.upper()] = mapping
             
             self.normalized_mappings = normalized_mappings
-            logger.info(f"Loaded {len(mappings)} symbol mappings")
+            logger.info(f"Loaded {len(mappings)} symbol mappings for input parser")
                     
         except Exception as e:
             logger.error(f"Error loading mapping file: {e}")
             self.normalized_mappings = {}
             
         return mappings
+    
+    def _get_index_ticker(self, symbol: str, security_type: str) -> Optional[Dict]:
+        """
+        Get special ticker mapping for index futures vs options - SAME AS TRADE PARSER
+        Returns None if no special rule applies
+        """
+        symbol_upper = symbol.upper()
+        
+        # Check if this symbol has special index rules
+        if symbol_upper in INDEX_TICKER_RULES:
+            rule = INDEX_TICKER_RULES[symbol_upper]
+            
+            # Return appropriate ticker based on security type
+            if security_type == 'Futures':
+                return {
+                    'ticker': rule['futures_ticker'],
+                    'underlying': rule.get('underlying', f"{symbol_upper} INDEX"),
+                    'lot_size': 50 if 'NIFTY' in symbol_upper else 15  # Default lot sizes
+                }
+            else:  # Options (Call or Put)
+                return {
+                    'ticker': rule['options_ticker'],
+                    'underlying': rule.get('underlying', f"{symbol_upper} INDEX"),
+                    'lot_size': 50 if 'NIFTY' in symbol_upper else 15
+                }
+        
+        return None
     
     def parse_file(self, file_path: str) -> List[Position]:
         """Parse input file and return positions"""
@@ -194,7 +257,6 @@ class InputParser:
                     if (('FUTSTK' in val or 'OPTSTK' in val or 'FUTIDX' in val or 'OPTIDX' in val) 
                         and val.count('-') >= 4):
                         ms_pattern_found = True
-                        logger.debug(f"Found MS pattern in row {i}: {val[:50]}")
                         break
             
             if ms_pattern_found:
@@ -273,7 +335,6 @@ class InputParser:
     def _parse_contract(self, df: pd.DataFrame) -> List[Position]:
         """Parse Contract CSV format"""
         positions = []
-        data_started = False
         
         for idx in range(len(df)):
             try:
@@ -312,11 +373,9 @@ class InputParser:
                     )
                     if position:
                         positions.append(position)
-                        data_started = True
                         
             except Exception as e:
-                if data_started:
-                    logger.debug(f"Error parsing CONTRACT row {idx}: {e}")
+                logger.debug(f"Error parsing CONTRACT row {idx}: {e}")
         
         logger.info(f"Parsed {len(positions)} positions from CONTRACT format")
         return positions
@@ -324,7 +383,6 @@ class InputParser:
     def _parse_ms(self, df: pd.DataFrame) -> List[Position]:
         """Parse MS Position format"""
         positions = []
-        valid_rows = 0
         
         for idx in range(len(df)):
             try:
@@ -337,7 +395,7 @@ class InputParser:
                 if not contract_id or '-' not in contract_id:
                     continue
                 
-                if any(keyword in contract_id.lower() for keyword in ['total', 'summary', 'net', 'mtm', 'payable', 'receivable']):
+                if any(keyword in contract_id.lower() for keyword in ['total', 'summary', 'net', 'mtm']):
                     continue
                 
                 try:
@@ -363,14 +421,11 @@ class InputParser:
                     )
                     if position:
                         positions.append(position)
-                        valid_rows += 1
                         
             except Exception as e:
                 logger.debug(f"Could not parse MS row {idx}: {e}")
         
-        if valid_rows > 0:
-            logger.info(f"Successfully parsed {valid_rows} positions from MS format")
-        
+        logger.info(f"Successfully parsed {len(positions)} positions from MS format")
         return positions
     
     def _find_data_start_bod(self, df: pd.DataFrame) -> int:
@@ -428,15 +483,34 @@ class InputParser:
             return None
     
     def _parse_date(self, date_str: str) -> datetime:
-        """Parse date string"""
-        date_str = str(date_str).strip().upper()
+        """Parse date string - MATCHING TRADE PARSER"""
+        date_str = str(date_str).strip()
         
+        # Try different date formats - SAME AS TRADE PARSER
+        formats = [
+            '%d/%m/%Y', '%d-%m-%Y', '%d.%m.%Y',
+            '%m/%d/%Y', '%m-%d-%Y', '%m.%d.%Y',
+            '%Y-%m-%d', '%Y/%m/%d', '%Y.%m.%d',
+            '%d/%m/%y', '%d-%m-%y', '%d.%m.%y',
+            '%m/%d/%y', '%m-%d-%y', '%m.%d.%y',
+            '%d-%b-%Y', '%d-%b-%y',  # For formats like 26-Sep-2025
+        ]
+        
+        for fmt in formats:
+            try:
+                return datetime.strptime(date_str, fmt)
+            except:
+                continue
+        
+        # Month map for manual parsing
         month_map = {
             'JAN': 1, 'FEB': 2, 'MAR': 3, 'APR': 4, 'MAY': 5, 'JUN': 6,
             'JUL': 7, 'AUG': 8, 'SEP': 9, 'OCT': 10, 'NOV': 11, 'DEC': 12
         }
         
-        match = re.match(r'(\d{1,2})([A-Z]{3})(\d{4})', date_str.replace('-', ''))
+        # Try manual parsing for DDMMMYYYY format
+        date_str_upper = date_str.upper()
+        match = re.match(r'(\d{1,2})([A-Z]{3})(\d{4})', date_str_upper.replace('-', ''))
         if match:
             day = int(match.group(1))
             month = month_map.get(match.group(2), 0)
@@ -444,55 +518,56 @@ class InputParser:
             if month:
                 return datetime(year, month, day)
         
-        return pd.to_datetime(date_str)
+        # Try pandas parser as fallback
+        try:
+            return pd.to_datetime(date_str)
+        except:
+            return None
     
     def _create_position(self, symbol: str, expiry: datetime, strike: float,
                         inst_type: str, position_lots: float, lot_size: Optional[int],
                         series: str) -> Optional[Position]:
-        """Create Position object from parsed data"""
+        """Create Position object from parsed data - MATCHING TRADE PARSER LOGIC"""
         symbol_normalized = symbol.strip().upper()
         
-        mapping = None
-        if symbol in self.symbol_mappings:
-            mapping = self.symbol_mappings[symbol]
-        elif symbol_normalized in self.normalized_mappings:
-            mapping = self.normalized_mappings[symbol_normalized]
-        
-        if not mapping:
-            self.unmapped_symbols.append({
-                'symbol': symbol,
-                'expiry': expiry,
-                'position_lots': position_lots
-            })
-            logger.warning(f"No mapping found for symbol: {symbol}")
+        # Check for special index ticker rules first - SAME AS TRADE PARSER
+        security_type = self._determine_security_type(inst_type, series)
+        if not security_type:
             return None
         
-        # Determine security type
-        inst_type = inst_type.upper()
-        series_upper = series.upper() if series else ''
+        special_mapping = self._get_index_ticker(symbol_normalized, security_type)
         
-        if inst_type == 'FF' or 'FUT' in inst_type or 'FUT' in series_upper:
-            security_type = 'Futures'
-        elif inst_type in ['CE', 'C', 'CALL']:
-            security_type = 'Call'
-        elif inst_type in ['PE', 'P', 'PUT']:
-            security_type = 'Put'
+        if special_mapping:
+            # Use special index rules
+            mapping = special_mapping
+            mapping['original_symbol'] = symbol
+            # Override lot size with the one from position file if available
+            if lot_size:
+                mapping['lot_size'] = lot_size
         else:
-            logger.debug(f"Could not determine security type for {symbol} with inst_type={inst_type}, series={series}")
-            return None
+            # Get regular mapping from file
+            mapping = None
+            if symbol in self.symbol_mappings:
+                mapping = self.symbol_mappings[symbol]
+            elif symbol_normalized in self.normalized_mappings:
+                mapping = self.normalized_mappings[symbol_normalized]
+            
+            if not mapping:
+                logger.warning(f"No mapping found for symbol: {symbol}")
+                self.unmapped_symbols.append({
+                    'symbol': symbol,
+                    'expiry': expiry,
+                    'position_lots': position_lots
+                })
+                return None
         
-        # Use the unified ticker generator
-        bloomberg_ticker = generate_bloomberg_ticker(
-            ticker=mapping['ticker'],
-            expiry=expiry,
-            security_type=security_type,
-            strike=strike,
-            series=series,
-            original_symbol=symbol
+        # Generate Bloomberg ticker - MATCHING TRADE PARSER
+        bloomberg_ticker = self._generate_bloomberg_ticker(
+            mapping['ticker'], expiry, security_type, strike, series
         )
         
         # Handle lot_size
-        if lot_size is not None:
+        if lot_size is not None and lot_size > 0:
             final_lot_size = lot_size
         else:
             final_lot_size = mapping.get('lot_size', 1)
@@ -502,7 +577,7 @@ class InputParser:
         logger.debug(f"Created position: {symbol} -> {bloomberg_ticker}")
         
         return Position(
-            underlying_ticker=mapping['underlying'],
+            underlying_ticker=mapping.get('underlying', f"{mapping['ticker']} IS Equity"),
             bloomberg_ticker=bloomberg_ticker,
             symbol=symbol,
             expiry_date=expiry,
@@ -511,3 +586,58 @@ class InputParser:
             strike_price=strike,
             lot_size=final_lot_size
         )
+    
+    def _determine_security_type(self, inst_type: str, series: str) -> Optional[str]:
+        """Determine security type from inst_type and series"""
+        inst_type = inst_type.upper()
+        series_upper = series.upper() if series else ''
+        
+        if inst_type == 'FF' or 'FUT' in inst_type or 'FUT' in series_upper:
+            return 'Futures'
+        elif inst_type in ['CE', 'C', 'CALL']:
+            return 'Call'
+        elif inst_type in ['PE', 'P', 'PUT']:
+            return 'Put'
+        else:
+            logger.debug(f"Could not determine security type for inst_type={inst_type}, series={series}")
+            return None
+    
+    def _generate_bloomberg_ticker(self, ticker: str, expiry: datetime,
+                                  security_type: str, strike: float, series: str = None) -> str:
+        """Generate Bloomberg ticker - MATCHING TRADE PARSER EXACTLY"""
+        ticker_upper = ticker.upper()
+        
+        # Check if this is an index based on ticker or series
+        is_index = False
+        if series:
+            series_upper = series.upper()
+            if 'IDX' in series_upper:  # FUTIDX, OPTIDX
+                is_index = True
+        
+        # Also check ticker itself
+        if ticker_upper in ['NZ', 'NBZ', 'NIFTY', 'BANKNIFTY', 'AF1', 'NSEBANK'] or 'NIFTY' in ticker_upper:
+            is_index = True
+        
+        if security_type == 'Futures':
+            month_code = MONTH_CODE.get(expiry.month, "")
+            year_code = str(expiry.year)[-1]
+            
+            if is_index:
+                return f"{ticker}{month_code}{year_code} Index"
+            else:
+                return f"{ticker}={month_code}{year_code} IS Equity"
+        else:
+            # Options format
+            date_str = expiry.strftime('%m/%d/%y')
+            strike_str = str(int(strike)) if strike == int(strike) else str(strike)
+            
+            if is_index:
+                if security_type == 'Call':
+                    return f"{ticker} {date_str} C{strike_str} Index"
+                else:
+                    return f"{ticker} {date_str} P{strike_str} Index"
+            else:
+                if security_type == 'Call':
+                    return f"{ticker} IS {date_str} C{strike_str} Equity"
+                else:
+                    return f"{ticker} IS {date_str} P{strike_str} Equity"
