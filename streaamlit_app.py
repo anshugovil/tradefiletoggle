@@ -1,6 +1,6 @@
 """
-Streamlit Application - FIXED SINGLE CLICK VERSION
-Processes and displays results with one button click
+Streamlit Application - ENHANCED VERSION
+Processes and displays results with missing mappings tracking
 """
 
 import streamlit as st
@@ -41,6 +41,13 @@ st.markdown("""
         background-color: #4CAF50; 
         color: white; 
     }
+    .warning-box {
+        background-color: #fff3cd;
+        border: 1px solid #ffc107;
+        border-radius: 4px;
+        padding: 10px;
+        margin: 10px 0;
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -53,6 +60,8 @@ def main():
         st.session_state.output_files = {}
     if 'dataframes' not in st.session_state:
         st.session_state.dataframes = {}
+    if 'missing_mappings' not in st.session_state:
+        st.session_state.missing_mappings = {'positions': [], 'trades': []}
     
     # Sidebar
     with st.sidebar:
@@ -150,6 +159,7 @@ def process_and_display(position_file, trade_file, mapping_file, use_default, de
         # Clear previous results
         st.session_state.output_files = {}
         st.session_state.dataframes = {}
+        st.session_state.missing_mappings = {'positions': [], 'trades': []}
         
         with st.spinner("Processing..."):
             # Save uploaded files
@@ -194,9 +204,18 @@ def process_and_display(position_file, trade_file, mapping_file, use_default, de
             
             st.success(f"✅ Parsed {len(trades)} trades ({trade_parser.format_type} format)")
             
+            # Check for missing mappings
+            missing_positions = len(input_parser.unmapped_symbols) if hasattr(input_parser, 'unmapped_symbols') else 0
+            missing_trades = len(trade_parser.unmapped_symbols) if hasattr(trade_parser, 'unmapped_symbols') else 0
+            
+            if missing_positions > 0 or missing_trades > 0:
+                st.warning(f"⚠️ Found unmapped symbols: {missing_positions} from positions, {missing_trades} from trades")
+                st.session_state.missing_mappings['positions'] = input_parser.unmapped_symbols if missing_positions > 0 else []
+                st.session_state.missing_mappings['trades'] = trade_parser.unmapped_symbols if missing_trades > 0 else []
+            
             # Show diagnostic
-            with st.expander("🔍 Ticker Matching"):
-                show_diagnostic(positions, trades)
+            with st.expander("🔍 Ticker Matching & Missing Mappings"):
+                show_diagnostic(positions, trades, input_parser, trade_parser)
             
             # Process trades
             position_manager = PositionManager()
@@ -209,13 +228,15 @@ def process_and_display(position_file, trade_file, mapping_file, use_default, de
             processed_trades_df = trade_processor.process_trades(trades, trade_df)
             final_positions_df = position_manager.get_final_positions()
             
-            # Generate output files
+            # Generate output files with parsers for missing mappings
             output_files = output_gen.save_all_outputs(
                 parsed_trades_df,
                 starting_positions_df,
                 processed_trades_df,
                 final_positions_df,
-                file_prefix="output"
+                file_prefix="output",
+                input_parser=input_parser,
+                trade_parser=trade_parser
             )
             
             # Store in session state
@@ -248,8 +269,8 @@ def process_and_display(position_file, trade_file, mapping_file, use_default, de
         st.error(f"❌ Error: {str(e)}")
         st.code(traceback.format_exc())
 
-def show_diagnostic(positions, trades):
-    """Show ticker matching diagnostic"""
+def show_diagnostic(positions, trades, input_parser=None, trade_parser=None):
+    """Show ticker matching diagnostic and missing mappings"""
     pos_tickers = {p.bloomberg_ticker for p in positions}
     trade_tickers = {t.bloomberg_ticker for t in trades}
     
@@ -264,10 +285,31 @@ def show_diagnostic(positions, trades):
         st.metric("Unmatched Positions", len(unmatched_pos))
     with col3:
         st.metric("Unmatched Trades", len(unmatched_trades))
+    
+    # Show missing mappings if any
+    if input_parser and hasattr(input_parser, 'unmapped_symbols') and input_parser.unmapped_symbols:
+        st.markdown("### ⚠️ Missing Mappings from Position File")
+        missing_df = pd.DataFrame(input_parser.unmapped_symbols)
+        st.dataframe(missing_df, use_container_width=True, height=150)
+    
+    if trade_parser and hasattr(trade_parser, 'unmapped_symbols') and trade_parser.unmapped_symbols:
+        st.markdown("### ⚠️ Missing Mappings from Trade File")
+        missing_df = pd.DataFrame(trade_parser.unmapped_symbols)
+        st.dataframe(missing_df, use_container_width=True, height=150)
 
 def display_results():
     """Display processing results"""
     st.header("📊 Results")
+    
+    # Show warning if there are missing mappings
+    if (st.session_state.missing_mappings['positions'] or 
+        st.session_state.missing_mappings['trades']):
+        st.markdown("""
+        <div class="warning-box">
+        <strong>⚠️ Warning:</strong> Some symbols could not be mapped. 
+        Download the MISSING_MAPPINGS file to see which symbols need to be added to your mapping file.
+        </div>
+        """, unsafe_allow_html=True)
     
     tabs = st.tabs([
         "📈 Processed Trades",
@@ -321,8 +363,51 @@ def display_results():
     with tabs[4]:
         st.subheader("📥 Download Files")
         
+        # Highlight missing mappings file if it exists
+        if 'missing_mappings' in st.session_state.output_files:
+            st.markdown("### ⚠️ Missing Mappings Files")
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                missing_path = st.session_state.output_files['missing_mappings']
+                if missing_path and Path(missing_path).exists():
+                    with open(missing_path, 'rb') as f:
+                        data = f.read()
+                    st.download_button(
+                        "📝 Download Missing Mappings Report",
+                        data,
+                        file_name=Path(missing_path).name,
+                        mime='text/csv',
+                        key="dl_missing",
+                        use_container_width=True,
+                        help="List of all unmapped symbols"
+                    )
+            
+            with col2:
+                # Check for template file
+                template_path = Path(missing_path).parent / f"MAPPING_TEMPLATE_{Path(missing_path).stem.split('_')[-1]}.csv"
+                if template_path.exists():
+                    with open(template_path, 'rb') as f:
+                        data = f.read()
+                    st.download_button(
+                        "📄 Download Mapping Template",
+                        data,
+                        file_name=template_path.name,
+                        mime='text/csv',
+                        key="dl_template",
+                        use_container_width=True,
+                        help="Ready-to-fill template for your mapping file"
+                    )
+            
+            st.markdown("---")
+        
+        st.markdown("### 📊 Output Files")
+        
         if st.session_state.output_files:
             for key, path in st.session_state.output_files.items():
+                if key in ['missing_mappings']:  # Already handled above
+                    continue
+                    
                 if path and Path(path).exists():
                     with open(path, 'rb') as f:
                         data = f.read()
@@ -347,6 +432,7 @@ def display_results():
         if st.button("🔄 Process New Files", type="secondary", use_container_width=True):
             st.session_state.output_files = {}
             st.session_state.dataframes = {}
+            st.session_state.missing_mappings = {'positions': [], 'trades': []}
             st.rerun()
 
 if __name__ == "__main__":
