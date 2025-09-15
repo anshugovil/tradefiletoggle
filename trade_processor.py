@@ -38,30 +38,85 @@ class TradeProcessor:
         """
         processed_rows = []
         
-        # Process each trade sequentially
+        # Log trade processing
+        logger.info(f"Processing {len(trades)} trades")
+        
+        # Create a mapping between parsed trades and original rows
+        # We'll match by row index primarily
         for idx, trade in enumerate(trades):
-            # Find matching row in original dataframe
-            original_row = self._find_matching_row(trade, trade_df, idx)
-            if original_row is None:
-                continue
+            try:
+                # Use row index directly if available
+                if idx < len(trade_df):
+                    original_row = trade_df.iloc[idx]
+                else:
+                    # Fallback to finding matching row
+                    original_row = self._find_matching_row(trade, trade_df, idx)
                 
-            # Process this trade
-            processed = self._process_single_trade(trade, original_row)
-            processed_rows.extend(processed)
+                if original_row is None:
+                    logger.warning(f"Could not find matching row for trade {idx}: {trade.symbol}")
+                    # Create a synthetic row with the trade data
+                    original_row = self._create_synthetic_row(trade)
+                
+                # Process this trade
+                processed = self._process_single_trade(trade, original_row)
+                processed_rows.extend(processed)
+                
+                logger.debug(f"Processed trade {idx}: {trade.symbol} - {len(processed)} output rows")
+                
+            except Exception as e:
+                logger.error(f"Error processing trade {idx}: {e}")
+                continue
+        
+        if not processed_rows:
+            logger.warning("No trades were successfully processed")
+            # Return empty dataframe with correct structure
+            return self._create_empty_output_dataframe(trade_df)
         
         return self._create_output_dataframe(processed_rows, trade_df)
     
+    def _create_synthetic_row(self, trade) -> pd.Series:
+        """Create a synthetic row when no matching row is found"""
+        # Create a row with the basic trade information
+        row_data = {
+            0: '',  # CP Code
+            1: 0,   # TM Code
+            2: '',  # Scheme
+            3: '',  # TM Name
+            4: '',  # Instr
+            5: trade.symbol,  # Symbol
+            6: trade.expiry_date.strftime('%d-%b-%Y') if hasattr(trade.expiry_date, 'strftime') else str(trade.expiry_date),  # Expiry
+            7: trade.lot_size,  # Lot Size
+            8: trade.strike_price,  # Strike Price
+            9: 'CE' if trade.security_type == 'Call' else 'PE' if trade.security_type == 'Put' else '',  # Option Type
+            10: 'B' if trade.position_lots > 0 else 'S',  # B/S
+            11: abs(trade.position_lots * trade.lot_size),  # Qty
+            12: abs(trade.position_lots),  # Lots Traded
+            13: 0  # Avg Price
+        }
+        return pd.Series(row_data)
+    
     def _find_matching_row(self, trade, trade_df: pd.DataFrame, idx: int) -> Optional[pd.Series]:
         """Find the original row in trade_df that matches this trade"""
-        # For MS format, match based on row index if possible
+        # Try direct index first
         if idx < len(trade_df):
             return trade_df.iloc[idx]
         
         # Fallback: match based on symbol and lots
-        for idx, row in trade_df.iterrows():
-            if (str(row.iloc[5]).upper() == trade.symbol.upper() and
-                abs(float(row.iloc[12]) if pd.notna(row.iloc[12]) else 0) == abs(trade.position_lots)):
-                return row
+        for row_idx, row in trade_df.iterrows():
+            try:
+                # Check if symbol matches (column 5)
+                row_symbol = str(row.iloc[5]).strip().upper() if pd.notna(row.iloc[5]) else ""
+                trade_symbol = trade.symbol.upper()
+                
+                # Check if lots match (column 12)
+                row_lots = abs(float(row.iloc[12])) if pd.notna(row.iloc[12]) else 0
+                trade_lots = abs(trade.position_lots)
+                
+                if row_symbol == trade_symbol and abs(row_lots - trade_lots) < 0.001:
+                    return row
+            except:
+                continue
+        
         return None
     
     def _process_single_trade(self, trade, original_row: pd.Series) -> List[ProcessedTrade]:
@@ -69,6 +124,8 @@ class TradeProcessor:
         ticker = trade.bloomberg_ticker
         trade_quantity = trade.position_lots  # Already has sign (+ for buy, - for sell)
         security_type = trade.security_type
+        
+        logger.debug(f"Processing {ticker}: quantity={trade_quantity}, type={security_type}")
         
         # Get current position
         position = self.position_manager.get_position(ticker)
@@ -78,17 +135,18 @@ class TradeProcessor:
             strategy = self._get_new_position_strategy(trade_quantity, security_type)
             
             processed = ProcessedTrade(
-                original_trade=original_row.to_dict(),
+                original_trade=original_row.to_dict() if hasattr(original_row, 'to_dict') else dict(original_row),
                 bloomberg_ticker=ticker,
                 strategy=strategy,
                 is_split=False,
                 is_opposite=False,
                 split_lots=abs(trade_quantity),
-                split_qty=abs(float(original_row.iloc[11]) if pd.notna(original_row.iloc[11]) else 0)
+                split_qty=abs(float(original_row.iloc[11]) if pd.notna(original_row.iloc[11]) else trade_quantity * trade.lot_size)
             )
             
             # Update position
             self.position_manager.update_position(ticker, trade_quantity, security_type)
+            logger.debug(f"New position created: {strategy}")
             
             return [processed]
         
@@ -101,17 +159,18 @@ class TradeProcessor:
             is_opposite = self._is_strategy_opposite_to_trade(strategy, trade_quantity, security_type)
             
             processed = ProcessedTrade(
-                original_trade=original_row.to_dict(),
+                original_trade=original_row.to_dict() if hasattr(original_row, 'to_dict') else dict(original_row),
                 bloomberg_ticker=ticker,
                 strategy=strategy,
                 is_split=False,
                 is_opposite=is_opposite,
                 split_lots=abs(trade_quantity),
-                split_qty=abs(float(original_row.iloc[11]) if pd.notna(original_row.iloc[11]) else 0)
+                split_qty=abs(float(original_row.iloc[11]) if pd.notna(original_row.iloc[11]) else trade_quantity * trade.lot_size)
             )
             
             # Update position
             self.position_manager.update_position(ticker, trade_quantity, security_type)
+            logger.debug(f"Adding to position: {strategy}, opposite={is_opposite}")
             
             return [processed]
         
@@ -122,21 +181,23 @@ class TradeProcessor:
             is_opposite = self._is_strategy_opposite_to_trade(strategy, trade_quantity, security_type)
             
             processed = ProcessedTrade(
-                original_trade=original_row.to_dict(),
+                original_trade=original_row.to_dict() if hasattr(original_row, 'to_dict') else dict(original_row),
                 bloomberg_ticker=ticker,
                 strategy=strategy,
                 is_split=False,
                 is_opposite=is_opposite,
                 split_lots=abs(trade_quantity),
-                split_qty=abs(float(original_row.iloc[11]) if pd.notna(original_row.iloc[11]) else 0)
+                split_qty=abs(float(original_row.iloc[11]) if pd.notna(original_row.iloc[11]) else trade_quantity * trade.lot_size)
             )
             
             # Update position
             self.position_manager.update_position(ticker, trade_quantity, security_type)
+            logger.debug(f"Reducing position: {strategy}, opposite={is_opposite}")
             
             return [processed]
         
         # Split needed
+        logger.debug(f"Splitting trade: position={position.quantity}, trade={trade_quantity}")
         return self._split_trade(trade, original_row, position)
     
     def _split_trade(self, trade, original_row: pd.Series, position) -> List[ProcessedTrade]:
@@ -154,14 +215,14 @@ class TradeProcessor:
         open_lots = total_lots - close_lots
         
         # Split the QTY proportionally
-        total_qty = abs(float(original_row.iloc[11]) if pd.notna(original_row.iloc[11]) else 0)
+        total_qty = abs(float(original_row.iloc[11]) if pd.notna(original_row.iloc[11]) else trade_quantity * trade.lot_size)
         close_qty = total_qty * (close_lots / total_lots)
         open_qty = total_qty * (open_lots / total_lots)
         
         # First split - closing position
         is_opposite_close = self._is_strategy_opposite_to_trade(position.strategy, trade_quantity, security_type)
         processed_close = ProcessedTrade(
-            original_trade=original_row.to_dict(),
+            original_trade=original_row.to_dict() if hasattr(original_row, 'to_dict') else dict(original_row),
             bloomberg_ticker=ticker,
             strategy=position.strategy,
             is_split=True,
@@ -179,7 +240,7 @@ class TradeProcessor:
         is_opposite_open = self._is_strategy_opposite_to_trade(new_strategy, open_quantity, security_type)
         
         processed_open = ProcessedTrade(
-            original_trade=original_row.to_dict(),
+            original_trade=original_row.to_dict() if hasattr(original_row, 'to_dict') else dict(original_row),
             bloomberg_ticker=ticker,
             strategy=new_strategy,
             is_split=True,
@@ -190,6 +251,8 @@ class TradeProcessor:
         
         # Update position with new position
         self.position_manager.update_position(ticker, open_quantity, security_type)
+        
+        logger.debug(f"Split complete: close={position.strategy}, open={new_strategy}")
         
         return [processed_close, processed_open]
     
@@ -221,6 +284,15 @@ class TradeProcessor:
                 # FUSH strategy: should be selling
                 return trade_quantity > 0  # Buying when should be selling
     
+    def _create_empty_output_dataframe(self, original_df: pd.DataFrame) -> pd.DataFrame:
+        """Create an empty output dataframe with the correct structure"""
+        if len(original_df.columns) > 0:
+            columns = list(original_df.columns) + ['Strategy', 'Split?', 'Opposite?', 'Bloomberg_Ticker']
+        else:
+            columns = list(range(14)) + ['Strategy', 'Split?', 'Opposite?', 'Bloomberg_Ticker']
+        
+        return pd.DataFrame(columns=columns)
+    
     def _create_output_dataframe(self, processed_trades: List[ProcessedTrade], original_df: pd.DataFrame) -> pd.DataFrame:
         """Create output DataFrame with all columns"""
         output_rows = []
@@ -230,17 +302,17 @@ class TradeProcessor:
             
             # Update the quantities for splits - maintain sign for B/S column
             if pt.is_split:
-                # Preserve the sign in column 12 (Lots Traded)
-                if isinstance(row_dict, dict):
-                    # Dictionary access
-                    original_sign = -1 if (12 in row_dict and row_dict[12] < 0) or (row_dict.get(10, '') == 'S') else 1
-                    row_dict[12] = pt.split_lots * original_sign
-                    row_dict[11] = pt.split_qty * original_sign
+                # Determine the original sign from B/S column or trade quantity
+                if 10 in row_dict:
+                    original_sign = -1 if str(row_dict[10]).upper() == 'S' else 1
+                elif isinstance(row_dict, dict) and 'B/S' in row_dict:
+                    original_sign = -1 if str(row_dict['B/S']).upper() == 'S' else 1
                 else:
-                    # If it's a series/array access
-                    original_sign = -1 if float(row_dict.get(12, 0)) < 0 else 1
-                    row_dict[12] = pt.split_lots * original_sign
-                    row_dict[11] = pt.split_qty * original_sign
+                    # Default to positive
+                    original_sign = 1
+                
+                row_dict[12] = pt.split_lots * original_sign
+                row_dict[11] = pt.split_qty * original_sign
             
             # Add new columns
             row_dict['Strategy'] = pt.strategy
@@ -254,11 +326,13 @@ class TradeProcessor:
         result_df = pd.DataFrame(output_rows)
         
         # Ensure correct column order
-        original_cols = list(original_df.columns) if len(original_df.columns) > 0 else [i for i in range(14)]
-        new_cols = ['Strategy', 'Split?', 'Opposite?', 'Bloomberg_Ticker']
+        if len(original_df.columns) > 0:
+            original_cols = list(original_df.columns)
+        else:
+            original_cols = list(range(14))
         
-        # Order columns properly
-        all_cols = list(original_cols) + new_cols
+        new_cols = ['Strategy', 'Split?', 'Opposite?', 'Bloomberg_Ticker']
+        all_cols = original_cols + new_cols
         
         # Ensure all columns exist
         for col in all_cols:
