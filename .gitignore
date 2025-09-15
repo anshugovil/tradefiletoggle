@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.env
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+bin/
+lib/
+include/
+share/
+
+# Output files
+output/
+*.xlsx
+*.xls
+*.csv
+# Keep the mapping file if you want to include it
+!futures mapping.csv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Temporary files
+*.tmp
+*.bak
+~*
+
+# Logs
+*.log
